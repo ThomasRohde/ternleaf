@@ -1,0 +1,1124 @@
+{
+  "description": "One edit of the `tables` family of the OpenDoc edit vocabulary 1.6.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "description": "Set the text of one table cell.",
+      "properties": {
+        "column": {
+          "description": "0-based cell in that row.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "op": {
+          "const": "set_cell_text",
+          "type": "string"
+        },
+        "row": {
+          "description": "0-based row.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "table": {
+          "description": "The table id.",
+          "type": "string"
+        },
+        "text": {
+          "description": "The new text.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "table",
+        "row",
+        "column",
+        "text"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Insert an empty row so it lands at `index`.",
+      "properties": {
+        "index": {
+          "description": "0 = above the first row, the row count = below the last.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "op": {
+          "const": "table_insert_row",
+          "type": "string"
+        },
+        "table": {
+          "description": "The table id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "table",
+        "index"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Delete one row.",
+      "properties": {
+        "index": {
+          "description": "0-based row.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "op": {
+          "const": "table_delete_row",
+          "type": "string"
+        },
+        "table": {
+          "description": "The table id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "table",
+        "index"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Insert an empty table after an anchor's top-level block.",
+      "properties": {
+        "after": {
+          "additionalProperties": false,
+          "description": "A paragraph; the table goes after the body block holding it.",
+          "properties": {
+            "exact": {
+              "description": "The quoted text, matched inside `node` only.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "node": {
+              "description": "A paragraph id returned by `get_outline`, `read_blocks` or `search`.",
+              "type": "string"
+            },
+            "occurrence": {
+              "description": "1-based occurrence of `exact` among the matches that remain.",
+              "format": "uint32",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pos": {
+              "additionalProperties": false,
+              "description": "Offsets for programs only; never computed by a model.",
+              "properties": {
+                "end": {
+                  "description": "End, exclusive.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "start": {
+                  "description": "Start, UTF-8 bytes into the node's text.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "prefix": {
+              "description": "Text immediately before `exact`, to disambiguate.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "side": {
+              "anyOf": [
+                {
+                  "description": "Which side of the target an insertion goes.",
+                  "oneOf": [
+                    {
+                      "const": "before",
+                      "description": "Before the quote (or at the paragraph's start).",
+                      "type": "string"
+                    },
+                    {
+                      "const": "after",
+                      "description": "After the quote (or at the paragraph's end). The default.",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "For an insertion point: before or after the target."
+            },
+            "suffix": {
+              "description": "Text immediately after `exact`, to disambiguate.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "node"
+          ],
+          "type": "object"
+        },
+        "columns": {
+          "description": "Columns, 1 to 20.",
+          "format": "uint32",
+          "maximum": 20,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "op": {
+          "const": "insert_table",
+          "type": "string"
+        },
+        "rows": {
+          "description": "Rows, 1 to 50.",
+          "format": "uint32",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "op",
+        "after",
+        "rows",
+        "columns"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Insert an empty column so it lands at grid column `index`.",
+      "properties": {
+        "index": {
+          "description": "0 = left of the first column, the column count = right of the last.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "op": {
+          "const": "table_insert_column",
+          "type": "string"
+        },
+        "table": {
+          "description": "The table id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "table",
+        "index"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Delete one grid column.",
+      "properties": {
+        "index": {
+          "description": "0-based grid column.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "op": {
+          "const": "table_delete_column",
+          "type": "string"
+        },
+        "table": {
+          "description": "The table id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "table",
+        "index"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Merge the rectangle of cells between two cells into one.",
+      "properties": {
+        "from": {
+          "additionalProperties": false,
+          "description": "One corner.",
+          "properties": {
+            "column": {
+              "description": "0-based cell in that row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "row": {
+              "description": "0-based row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "row",
+            "column"
+          ],
+          "type": "object"
+        },
+        "op": {
+          "const": "table_merge_cells",
+          "type": "string"
+        },
+        "table": {
+          "description": "The table id.",
+          "type": "string"
+        },
+        "to": {
+          "additionalProperties": false,
+          "description": "The opposite corner.",
+          "properties": {
+            "column": {
+              "description": "0-based cell in that row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "row": {
+              "description": "0-based row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "row",
+            "column"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "op",
+        "table",
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Unmerge the merged cell a cell belongs to.",
+      "properties": {
+        "cell": {
+          "additionalProperties": false,
+          "description": "A cell of the merged cell.",
+          "properties": {
+            "column": {
+              "description": "0-based cell in that row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "row": {
+              "description": "0-based row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "row",
+            "column"
+          ],
+          "type": "object"
+        },
+        "op": {
+          "const": "table_split_cell",
+          "type": "string"
+        },
+        "table": {
+          "description": "The table id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "table",
+        "cell"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Delete a whole table.",
+      "properties": {
+        "op": {
+          "const": "table_delete",
+          "type": "string"
+        },
+        "table": {
+          "description": "The table id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "table"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Set the shading and/or vertical alignment of one cell or a rectangle.",
+      "properties": {
+        "from": {
+          "additionalProperties": false,
+          "description": "The cell, or one corner of the rectangle.",
+          "properties": {
+            "column": {
+              "description": "0-based cell in that row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "row": {
+              "description": "0-based row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "row",
+            "column"
+          ],
+          "type": "object"
+        },
+        "op": {
+          "const": "table_set_cell_format",
+          "type": "string"
+        },
+        "shading": {
+          "description": "Fill `#RRGGBB`, or `none` to clear.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "table": {
+          "description": "The table id.",
+          "type": "string"
+        },
+        "text_direction": {
+          "anyOf": [
+            {
+              "description": "Which way a cell's text runs (`w:textDirection`).",
+              "oneOf": [
+                {
+                  "const": "horizontal",
+                  "description": "Left to right, the default.",
+                  "type": "string"
+                },
+                {
+                  "const": "rotate_down",
+                  "description": "Rotated 90 degrees clockwise: read top to bottom.",
+                  "type": "string"
+                },
+                {
+                  "const": "rotate_up",
+                  "description": "Rotated 90 degrees counter-clockwise: read bottom to top.",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Which way the text runs: horizontal, rotated down (read top to\nbottom) or rotated up (read bottom to top)."
+        },
+        "to": {
+          "additionalProperties": false,
+          "description": "The opposite corner; omitted for one cell.",
+          "properties": {
+            "column": {
+              "description": "0-based cell in that row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "row": {
+              "description": "0-based row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "row",
+            "column"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "vertical_alignment": {
+          "anyOf": [
+            {
+              "description": "A cell's vertical text alignment.",
+              "oneOf": [
+                {
+                  "const": "top",
+                  "description": "Top.",
+                  "type": "string"
+                },
+                {
+                  "const": "center",
+                  "description": "Centred.",
+                  "type": "string"
+                },
+                {
+                  "const": "bottom",
+                  "description": "Bottom.",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Vertical alignment of the text."
+        }
+      },
+      "required": [
+        "op",
+        "table",
+        "from"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Turn table style options on or off: which parts of the table style\n(header row, first column, total row, last column, banding) apply.",
+      "properties": {
+        "banded_columns": {
+          "description": "Alternate column shading.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "banded_rows": {
+          "description": "Alternate row shading.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "first_column": {
+          "description": "The style's first-column formatting.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "header_row": {
+          "description": "The style's header-row formatting.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "last_column": {
+          "description": "The style's last-column formatting.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "op": {
+          "const": "table_set_style_options",
+          "type": "string"
+        },
+        "table": {
+          "description": "The table id.",
+          "type": "string"
+        },
+        "total_row": {
+          "description": "The style's total-row formatting.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "op",
+        "table"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Split a table so a row starts a second table, with an empty paragraph\nbetween; at row 0 the paragraph goes above the table instead.",
+      "properties": {
+        "op": {
+          "const": "table_split",
+          "type": "string"
+        },
+        "row": {
+          "description": "The 0-based row that starts the second table.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "table": {
+          "description": "The table id (a table in the document body).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "table",
+        "row"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Insert empty cells at one cell or a rectangle, shifting the cells\nalready there right or down.",
+      "properties": {
+        "from": {
+          "additionalProperties": false,
+          "description": "The cell, or one corner of the rectangle.",
+          "properties": {
+            "column": {
+              "description": "0-based cell in that row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "row": {
+              "description": "0-based row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "row",
+            "column"
+          ],
+          "type": "object"
+        },
+        "op": {
+          "const": "table_insert_cells",
+          "type": "string"
+        },
+        "shift": {
+          "description": "Which way the cells already there move.",
+          "oneOf": [
+            {
+              "const": "right",
+              "description": "Push the row's later cells right.",
+              "type": "string"
+            },
+            {
+              "const": "down",
+              "description": "Push the cells below down.",
+              "type": "string"
+            }
+          ]
+        },
+        "table": {
+          "description": "The table id.",
+          "type": "string"
+        },
+        "to": {
+          "additionalProperties": false,
+          "description": "The opposite corner; omitted for one cell.",
+          "properties": {
+            "column": {
+              "description": "0-based cell in that row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "row": {
+              "description": "0-based row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "row",
+            "column"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "op",
+        "table",
+        "from",
+        "shift"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Delete one cell or a rectangle, closing the gap left or up.",
+      "properties": {
+        "from": {
+          "additionalProperties": false,
+          "description": "The cell, or one corner of the rectangle.",
+          "properties": {
+            "column": {
+              "description": "0-based cell in that row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "row": {
+              "description": "0-based row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "row",
+            "column"
+          ],
+          "type": "object"
+        },
+        "op": {
+          "const": "table_delete_cells",
+          "type": "string"
+        },
+        "shift": {
+          "description": "Which way the remaining cells move.",
+          "oneOf": [
+            {
+              "const": "left",
+              "description": "Close the row up to the left.",
+              "type": "string"
+            },
+            {
+              "const": "up",
+              "description": "Move the cells below up.",
+              "type": "string"
+            }
+          ]
+        },
+        "table": {
+          "description": "The table id.",
+          "type": "string"
+        },
+        "to": {
+          "additionalProperties": false,
+          "description": "The opposite corner; omitted for one cell.",
+          "properties": {
+            "column": {
+              "description": "0-based cell in that row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "row": {
+              "description": "0-based row.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "row",
+            "column"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "op",
+        "table",
+        "from",
+        "shift"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Convert a table to text, each row a paragraph with its cells joined by\na separator (or, for `paragraph`, each cell's paragraphs in order).",
+      "properties": {
+        "character": {
+          "description": "The character, when `separator` is `other`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nested": {
+          "default": false,
+          "description": "Convert tables nested in its cells too; kept as tables when false.",
+          "type": "boolean"
+        },
+        "op": {
+          "const": "table_to_text",
+          "type": "string"
+        },
+        "separator": {
+          "description": "What joins the cells.",
+          "oneOf": [
+            {
+              "const": "paragraph",
+              "description": "A paragraph mark: each paragraph is a cell, each cell's paragraphs stay\nparagraphs.",
+              "type": "string"
+            },
+            {
+              "const": "tab",
+              "description": "A tab.",
+              "type": "string"
+            },
+            {
+              "const": "comma",
+              "description": "A comma.",
+              "type": "string"
+            },
+            {
+              "const": "semicolon",
+              "description": "A semicolon.",
+              "type": "string"
+            },
+            {
+              "const": "other",
+              "description": "The single character given in `character`.",
+              "type": "string"
+            }
+          ]
+        },
+        "table": {
+          "description": "The table id (a table in the document body).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "table",
+        "separator"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Convert consecutive paragraphs into a table, cutting each paragraph\ninto cells at a separator.",
+      "properties": {
+        "autofit": {
+          "default": "fixed",
+          "description": "How the columns are sized; `fixed` when omitted.",
+          "oneOf": [
+            {
+              "const": "fixed",
+              "description": "Equal fixed columns across the content width (the default, Word's).",
+              "type": "string"
+            },
+            {
+              "const": "contents",
+              "description": "Columns sized by their contents.",
+              "type": "string"
+            },
+            {
+              "const": "window",
+              "description": "The table spans the window: 100% wide.",
+              "type": "string"
+            }
+          ]
+        },
+        "character": {
+          "description": "The character, when `separator` is `other`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "columns": {
+          "description": "Columns, 1 to 63; omitted for what the text needs, and never fewer.",
+          "format": "uint32",
+          "maximum": 63,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "from": {
+          "additionalProperties": false,
+          "description": "The first paragraph.",
+          "properties": {
+            "exact": {
+              "description": "The quoted text, matched inside `node` only.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "node": {
+              "description": "A paragraph id returned by `get_outline`, `read_blocks` or `search`.",
+              "type": "string"
+            },
+            "occurrence": {
+              "description": "1-based occurrence of `exact` among the matches that remain.",
+              "format": "uint32",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pos": {
+              "additionalProperties": false,
+              "description": "Offsets for programs only; never computed by a model.",
+              "properties": {
+                "end": {
+                  "description": "End, exclusive.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "start": {
+                  "description": "Start, UTF-8 bytes into the node's text.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "prefix": {
+              "description": "Text immediately before `exact`, to disambiguate.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "side": {
+              "anyOf": [
+                {
+                  "description": "Which side of the target an insertion goes.",
+                  "oneOf": [
+                    {
+                      "const": "before",
+                      "description": "Before the quote (or at the paragraph's start).",
+                      "type": "string"
+                    },
+                    {
+                      "const": "after",
+                      "description": "After the quote (or at the paragraph's end). The default.",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "For an insertion point: before or after the target."
+            },
+            "suffix": {
+              "description": "Text immediately after `exact`, to disambiguate.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "node"
+          ],
+          "type": "object"
+        },
+        "op": {
+          "const": "text_to_table",
+          "type": "string"
+        },
+        "separator": {
+          "description": "Where each paragraph is cut into cells.",
+          "oneOf": [
+            {
+              "const": "paragraph",
+              "description": "A paragraph mark: each paragraph is a cell, each cell's paragraphs stay\nparagraphs.",
+              "type": "string"
+            },
+            {
+              "const": "tab",
+              "description": "A tab.",
+              "type": "string"
+            },
+            {
+              "const": "comma",
+              "description": "A comma.",
+              "type": "string"
+            },
+            {
+              "const": "semicolon",
+              "description": "A semicolon.",
+              "type": "string"
+            },
+            {
+              "const": "other",
+              "description": "The single character given in `character`.",
+              "type": "string"
+            }
+          ]
+        },
+        "to": {
+          "additionalProperties": false,
+          "description": "The last paragraph, in the same container; omitted for one.",
+          "properties": {
+            "exact": {
+              "description": "The quoted text, matched inside `node` only.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "node": {
+              "description": "A paragraph id returned by `get_outline`, `read_blocks` or `search`.",
+              "type": "string"
+            },
+            "occurrence": {
+              "description": "1-based occurrence of `exact` among the matches that remain.",
+              "format": "uint32",
+              "minimum": 1,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pos": {
+              "additionalProperties": false,
+              "description": "Offsets for programs only; never computed by a model.",
+              "properties": {
+                "end": {
+                  "description": "End, exclusive.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "start": {
+                  "description": "Start, UTF-8 bytes into the node's text.",
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "prefix": {
+              "description": "Text immediately before `exact`, to disambiguate.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "side": {
+              "anyOf": [
+                {
+                  "description": "Which side of the target an insertion goes.",
+                  "oneOf": [
+                    {
+                      "const": "before",
+                      "description": "Before the quote (or at the paragraph's start).",
+                      "type": "string"
+                    },
+                    {
+                      "const": "after",
+                      "description": "After the quote (or at the paragraph's end). The default.",
+                      "type": "string"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "For an insertion point: before or after the target."
+            },
+            "suffix": {
+              "description": "Text immediately after `exact`, to disambiguate.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "node"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "op",
+        "from",
+        "separator"
+      ],
+      "type": "object"
+    }
+  ]
+}

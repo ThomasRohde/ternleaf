@@ -1,0 +1,1033 @@
+// Where a command lives, and how its label reads on the surface it is shown on.
+//
+// Extracted from `main.js` for the same reason `edit_errors.mjs` was (`109`
+// HF-085): the module is ~90% of the webapp with zero exports, so every rule
+// about the command surfaces could only be checked by reading main.js as TEXT.
+// `menu_taxonomy.test.mjs` really did parse `APP_MENU_SECTIONS` out of the file
+// with a brace matcher, which is why the parity guards `109` UX-004 asks for —
+// "the ids this surface offers are EXACTLY this set" — could not be written:
+// a regex over an 18k-line file can prove what is there, never what is missing.
+//
+// Nothing here touches the DOM or the engine. The behaviour (what a command
+// DOES, whether it is enabled, what it refuses with) stays in `main.js` with
+// the state it reads; only the taxonomy and the pure label/shape rules move.
+import { has, t } from "./i18n.mjs";
+
+// ---- The File surface: ONE declaration, two renderings ---------------------
+//
+// The editor used to carry TWO navigation systems at once: an application menu
+// bar (File / Edit / View / …) in the header and a ribbon tab strip (Home /
+// Insert / Layout / …) under it. A person had to decide WHICH OF TWO PLACES a
+// command lived before they could look for it, which is the cognitive burden
+// `109` UX-014 records and the owner asked to remove. The fix is one axis per
+// chrome — never two on screen together (docs/122):
+//
+//   ribbon mode   the tab strip IS the axis, and `File` is its first tab,
+//                 opening a full-window page. Source-verified from ONLYOFFICE:
+//                 `apps/documenteditor/main/app/view/Toolbar.js:182-186`
+//                 declares the tabs as File, Home, Insert, Layout, References,
+//                 and File alone carries `haspanel: false` — it is a page, not
+//                 a band. The menu bar is hidden here.
+//   compact mode  there is no band to put a File page under, so the axis is the
+//                 menu bar and `File` is a dropdown, the shape Google Docs and
+//                 Google Drive use. The ribbon is hidden here.
+//
+// Both renderings read THIS list, so the two cannot drift into different File
+// rosters — the "prefer one mechanism over two" rule. The band NAMES are what
+// the page prints as headings and what the dropdown announces as group names.
+//
+// The roster follows ONLYOFFICE's File page, whose items are
+// `DE.Views.FileMenu.btn*` in their `locale/en.json`: Create New, Open, Open
+// Recent, Save, Save As, Save Copy As, Download As, Print, Info, Advanced
+// Settings, Help. The ORDER is Google Docs' File menu (New, Open … Page setup,
+// Print …), because that is the order this editor already shipped and the owner
+// named Drive as the compact-mode reference. Their Protect, Rename, Version
+// History, Access Rights, Suggest a Feature and Switch to Mobile are NOT here:
+// see docs/122 §6 for why each one is absent rather than forgotten.
+//
+// ---- Bands are NAMED, and the name is a catalogue key ----------------------
+//
+// Every band in every menu carries a `nameKey`, never an English string. Three
+// things follow from that, and all three are requirements rather than taste:
+//
+//   * a screen reader gets a `role="group"` with a NAME ("Clipboard, group")
+//     instead of an anonymous rule it can only announce as "separator", so the
+//     band means the same thing to a reader as the hairline does to a viewer;
+//   * the name is translated, in every locale, like every other user-facing
+//     string in the editor (docs/124). An English literal here would also raise
+//     this file's unrouted-string ceiling, which is refused;
+//   * the File PAGE prints it as a heading and the File DROPDOWN announces it
+//     as a group name, from the one declaration — the two File surfaces cannot
+//     name a band two different things.
+//
+// The keys live under `menuGroup.*` in `en_strings.mjs`. Where the ribbon
+// already had a group of the same name, the English is the SAME sentence and
+// every locale's value was copied from the catalogue entry the ribbon uses, not
+// translated a second time: a band called "Illustrations" in the menu and a
+// ribbon group called something else would read as two products.
+export const FILE_SURFACE = [
+  { nameKey: "menuGroup.newAndOpen", ids: ["file.new", "file.open", "file.recoverDrafts"] },
+  { nameKey: "menuGroup.save", ids: ["file.save", "collab.share"] },
+  // The nine export formats behind one row. Google Docs files exactly these
+  // under Download; Word's backstage gives Export its own page. Ten rows of
+  // which nine say "export as" is the shape that made this menu long, and Save
+  // is not one of them — it belongs beside New and Open, not behind a flyout.
+  //
+  // The File PAGE renders a submenu flat, so its Export category keeps the
+  // heading-over-rows treatment it already had; only the dropdown folds.
+  //
+  // `dotx`, `html` and `markdown` joined the six: all three writers shipped in
+  // the engine and reached NO menu at all, so the only place they surfaced was
+  // the Save-as picker, under their raw format ids. Order follows Word's
+  // backstage — the document formats, then the interchange ones, with the
+  // debugging artifact last.
+  {
+    nameKey: "filePane.export.label",
+    submenu: true,
+    ids: [
+      "file.export.pdf",
+      "file.export.docx",
+      "file.export.dotx",
+      "file.export.odt",
+      "file.export.rtf",
+      "file.export.html",
+      "file.export.markdown",
+      "file.export.text",
+      "file.export.json",
+    ],
+  },
+  // Page setup was under Tools, which is where nobody looks for paper size —
+  // Docs files it under File and Word under Layout. It is on the Layout ribbon
+  // too; this gives it a File home that matches the competition.
+  // Print selection beside Print (`docs/153` shell.print-selection), as Word's
+  // Print dialog offers "Print Selection" beside "Print All Pages".
+  { nameKey: "menuGroup.print", ids: ["layout.pageSetup", "file.print", "file.printSelection"] },
+  // Compatibility findings beside the document's properties: Word's File ▸ Info
+  // is where both live (Properties, and Check for Issues ▸ Check Compatibility).
+  // It is the second surface the header chip's report needed — the chip is
+  // hidden on a phone, so without this row the report was a pointer-only
+  // capability on one device class and unreachable on another.
+  { nameKey: "menuGroup.document", ids: ["file.properties", "file.compatibilityReport"] },
+  // What a document opened from a PDF can become (`docs/182` §17a): Acrobat
+  // keeps "Recognize Text" and "Export PDF" together under its PDF tools, and
+  // so does this, behind one row so the File menu stays inside
+  // `menu-submenus.spec.mjs`'s cap. Disabled with the reason for any other
+  // document, never absent (SKILL §10).
+  { nameKey: "menuGroup.pdf", submenu: true, ids: ["file.pdf.keepExactLayout", "file.pdf.recogniseText", "file.pdf.convertToFlowing"] },
+  // Version history's PRIMARY home, and the one both references agree on: Google
+  // Docs is File ▸ Version history ▸ See version history, ONLYOFFICE is a File
+  // page item (`DE.Views.FileMenu.btnHistory`), Word puts it under File ▸ Info.
+  // `docs/139` §8.1 names this entry point first. It is its own heading rather
+  // than a row under Document because a document's metadata and its past are
+  // different questions, and because §6 of `docs/122` listed Version History as
+  // "not adopted … `docs/107` designs it; not built" — that sentence was true
+  // when it was written and is corrected there in this change.
+  // Google Docs' File ▸ Version history ▸ (See version history, Name current
+  // version): one row, so File stays within a screenful (menu-submenus).
+  { nameKey: "menuGroup.history", submenu: true, ids: ["file.versionHistory", "file.saveSharedVersion"] },
+  // ONLYOFFICE's "Advanced Settings" and "Help" are both File-page items. They
+  // were the whole content of a `Tools` menu and a `Help` menu, which is two
+  // more top-level names for five rows — and the two that fell off the end of
+  // the menu bar behind a hidden scrollbar (`109` HF-097).
+  // The measurement-unit preference sits in the SAME band as Settings, and in
+  // ONLYOFFICE it is literally the same pane: `cmbUnit` is a row of their File ▸
+  // Advanced Settings (`FileMenuPanels.js:747`), and Word's home for it is File ▸
+  // Options ▸ Advanced. This row lands on the chooser inside Settings rather than
+  // being a second copy of it, so the preference has one control and two ways in.
+  { nameKey: "menuGroup.settings", ids: ["view.settings", "view.measurementUnits"] },
+  // Help behind one row, as Google Docs (a Help menu) and Word (File ▸ Help)
+  // both file it: the three rows are where a reader goes for the editor rather
+  // than for the document. Folded when Compatibility findings joined Document and
+  // took the File menu to 14 top-level rows, one past `menu-submenus.spec.mjs`'s
+  // cap of 13. The File PAGE renders a submenu flat, so its Help group is unchanged.
+  { nameKey: "menuGroup.help", submenu: true, ids: ["help.commands", "help.shortcuts", "help.about"] },
+];
+
+/**
+ * The ribbon's tab strip, as ONE ordered list.
+ *
+ * Declared rather than left to emerge from the markup because ONLYOFFICE's own
+ * order is an emergent property of seven `Mixtbar.addTab(tab, panel, after)`
+ * calls with hard-coded indices into a sparse array — their order appears in no
+ * single file and cannot be read off one. That is a trap, not a pattern to copy.
+ * `menu_taxonomy.test.mjs` asserts `editor.html` renders exactly this sequence,
+ * so the strip's order is reviewable in a diff.
+ *
+ * The order itself IS theirs, minus the tabs this editor has nothing to put on:
+ * File, Home, Insert, Layout, References, Review, View, then contextual tabs at
+ * the right-hand end. `page: true` marks the one tab that shows a page instead
+ * of a band; `contextual: true` marks a tab that is disabled until its object is
+ * selected.
+ */
+export const RIBBON_TABS = [
+  { tab: "file", label: "File", page: true },
+  { tab: "home", label: "Home" },
+  { tab: "insert", label: "Insert" },
+  { tab: "layout", label: "Layout" },
+  { tab: "references", label: "References" },
+  { tab: "review", label: "Review" },
+  { tab: "view", label: "View" },
+  { tab: "table", label: "Table", contextual: true },
+  // Named in the markup (`documentChrome.chart`), which is the label a reader
+  // sees in every locale; nothing reads a label here.
+  { tab: "chart", contextual: true },
+  // Exists only while a header or footer is open (docs/174 OL-08), like
+  // ONLYOFFICE's HeaderFooterTab and Word's Header & Footer tab.
+  { tab: "headerFooter", contextual: true },
+];
+
+/** The File roster as named bands, the shape both menu renderers take. */
+export function fileMenuSections() {
+  return FILE_SURFACE;
+}
+
+/** Every command id the File surface offers, in page order. */
+export function fileSurfaceCommandIds() {
+  return FILE_SURFACE.flatMap((section) => section.ids);
+}
+
+/** One band: a catalogue key for its name, and the commands it holds.
+ *
+ *  A function rather than an object literal per band because the shape is
+ *  declared forty-odd times below and the noise was the reason the old
+ *  `string[][]` shape survived so long — the bands existed, they just could not
+ *  say what they were. */
+const band = (nameKey, ...ids) => ({ nameKey, ids });
+
+/** One band rendered as a SUBMENU: the band's name becomes a row, and its
+ *  commands live in a flyout behind it.
+ *
+ *  A named band with a hairline over it still leaves every row on screen, and
+ *  the owner's report was about length, not about grouping: Format listed 31
+ *  rows, Table 28. Google Docs' Format menu is about ten rows of which most
+ *  open a submenu (Text, Align & indent, Line & paragraph spacing, Bullets &
+ *  numbering); Word and ONLYOFFICE decompose Table the same way (Insert,
+ *  Delete, Select, Merge, Cell size). So the long bands become submenus and the
+ *  short ones stay inline under their heading — a one- or two-row band behind a
+ *  flyout is a click spent to save nothing.
+ *
+ *  Same declaration, one more field: every surface that reads `APP_MENU_SECTIONS`
+ *  — the menu bar, the compact toolbar's Table dropdown, the File page — reads
+ *  this too, so a submenu cannot exist in one and not the other. The File page
+ *  deliberately renders them FLAT: a full window has the room to show a group,
+ *  which is the same reason it uses headings where the dropdown uses names. */
+const sub = (nameKey, ...ids) => ({ nameKey, ids, submenu: true });
+
+// The COMPACT chrome's menu bar. One command has ONE menu home: eight ids used
+// to sit in two menus each (the three review modes, `review.toggle`,
+// `view.showChanges`, `review.comment`, `layout.paragraph`, `file.properties`),
+// which is what made browsing the bar feel repetitive — the same row answered
+// twice and the menus stopped telling you where a thing lives. Reachability
+// from more than one SURFACE is a requirement here (docs/105 command-surface
+// parity) and is unaffected: every command below is still in the palette, and
+// most are on the ribbon. What is fixed is duplication WITHIN the bar.
+//
+// Where the split was a judgement call it follows Google Docs, which is the
+// stated bar: editing mode is View ▸ Mode, a comment is Insert ▸ Comment, page
+// setup is File ▸ Page setup. Tracked-change OPERATIONS stay in Review.
+//
+// There is no `tools` menu. Its three rows went where the competition puts
+// them: Settings is ONLYOFFICE's File ▸ Advanced Settings, and spell check and
+// smart quotes are proofing — Word's Review ▸ Proofing group. That is two fewer
+// top-level names to scan and it is what stops the bar overflowing (HF-097).
+//
+// ---- The bands, and whose convention each one follows ----------------------
+//
+// The owner's report was that the menus are flat lists: "grouping of things is
+// necessary in file menus in compact mode … basically menus like File, Edit,
+// View". Compact mode is where it bites hardest, because the menu bar is that
+// chrome's ONLY navigation axis — there is no ribbon behind it to fall back on.
+//
+// Nothing below is invented. Where Word, Google Docs and ONLYOFFICE agree on a
+// band and its place, that is what this is; where they differ the choice is
+// named in the comment beside it. The rule the four references share and that
+// this follows everywhere: **bulk and destructive rows get their own band**, so
+// "Accept all changes" is never one keystroke past "Accept change", and
+// "Delete table" is never one past "Insert row above". A separator is a safety
+// affordance before it is a scanning one.
+export const APP_MENU_SECTIONS = {
+  file: fileMenuSections(),
+  // Word's Edit menu, Docs' Edit menu and LibreOffice's all read the same:
+  // undo/redo | cut/copy/paste | select all | find and replace. Select all and
+  // Find each get their own band in all three — they are one row each here, and
+  // a one-row band is still the right answer when the three references agree
+  // that this row is not a member of the band above it.
+  edit: [
+    band("menuGroup.undo", "edit.undo", "edit.redo"),
+    band("menuGroup.clipboard", "edit.cut", "edit.copy", "edit.paste", "edit.pasteText", "edit.pasteImage"),
+    band("menuGroup.selection", "edit.selectAll"),
+    band("menuGroup.find", "edit.find"),
+  ],
+  // Docs opens View with Mode; Word's View tab reads Views | Show | Zoom. So:
+  // mode, then what the window shows, then how big. The ribbon-density switch
+  // joins Show rather than standing alone — it changes what the window shows
+  // and not what the document says, which is the test every row in that band
+  // passes.
+  view: [
+    band("menuGroup.mode", "review.mode.editing", "review.mode.suggesting", "review.mode.viewing"),
+    // `view.pages` sits beside `view.outline` because the two are the same kind
+    // of thing — a navigation panel the rail opens — and they were not the same
+    // kind of REACHABLE thing: the outline had a command id and Pages did not.
+    // Its only surface in the whole product was the rail's `#railPages` tile,
+    // so a chrome that withheld the rail (a host withholding the region, or a
+    // phone reclaiming 44px of height) took `#pagesPanel` off that device class
+    // entirely while it stayed reachable at 1280px. That is "never a dead
+    // control" seen from the other side, and it is why `docs/148` §5.3 kept the
+    // rail on a phone against all three references. With an id here the rail is
+    // a convenience rather than a life-support system. `docs/148` §9 item 3.
+    // `view.reflow` sits in Show with the other view STATES rather than in Zoom:
+    // it changes what is laid out, not how large it is drawn. All three
+    // references file their equivalent under View for the same reason
+    // (`docs/151` §6.1).
+    // Folding joins Show, and the three rows are the three Word offers on a
+    // heading's context menu: Expand/Collapse, Collapse All Headings, Expand All
+    // Headings. They are view STATES of what the window shows — which is the
+    // test every row in this band passes — and they sit beside `view.outline`
+    // because the outline panel is the other surface that drives the same
+    // `FoldSet`.
+    //
+    // The NINE level rungs (`view.fold.level.*`) stay palette-only, deliberately
+    // and not by omission: nine inline rows for one choice would be three times
+    // the longest band in this menu, a flyout would need a band name and
+    // therefore a new key in nineteen catalogues, and Word itself puts level
+    // selection in the Table-of-Contents dialog rather than on a menu. The
+    // palette is a real surface and `view.fold.all` / `view.fold.none` are the
+    // two rungs anybody reaches for.
+    band(
+      "menuGroup.show",
+      "view.outline",
+      "view.pages",
+      "view.showChanges",
+      "view.reflow",
+      // Beside `view.reflow` because it is the question that view raises:
+      // what is this layout not showing me the way the page does? The engine
+      // has answered it since reflow shipped and nothing asked (`docs/166`
+      // R-7), and the answer is document-derived, so the row is honest in both
+      // views rather than reciting a fixed list.
+      "view.reflowApproximations",
+      "view.compactRibbon",
+    ),
+    // A SUBMENU, for the reason this file already applies to
+    // `menuGroup.formattingMarks`: three inline rows for one gesture family that
+    // most people reach through the heading chevron or the outline tree, not
+    // through View. It is also the row that had to give. Adding
+    // `view.reflowApproximations` took this menu to FOURTEEN top-level rows
+    // against `menu-submenus.spec.mjs`'s cap of 13 — "no menu makes a reader scan
+    // more than a screenful", which is the owner's own ask ("my ask was to group
+    // them and create sub menus .. so it's readable"). CI said `view lists 14
+    // rows at the top level`, and that cap is a UX guarantee, not a ratchet to
+    // raise.
+    //
+    // Folding and not something else, by this file's own test: Show holds STATES
+    // of the window, and `view.outline`, `view.pages`, `view.showChanges`,
+    // `view.reflow` and `view.compactRibbon` each answer "what is the window
+    // showing". The three fold rows are one FAMILY acting on headings, which is
+    // the `menuGroup.formattingMarks` shape exactly — and the nine level rungs
+    // below are already palette-only on the same argument one step further down.
+    //
+    // The band name is each catalogue's own `fold.treeLabel` — the outline
+    // tree's label, the one string in all nineteen that already names these
+    // things in that language. No translation here is one I invented.
+    sub("menuGroup.headings", "view.fold.toggle", "view.fold.all", "view.fold.none"),
+    // Formatting marks. Google Docs' only surface for this is View ▸ Show
+    // non-printing characters, so the View menu is where a reader trained on Docs
+    // looks; the ribbon's ¶ button is where a reader trained on Word looks, and
+    // both exist.
+    //
+    // A SUBMENU, with the ¶ toggle as its first row and the five individual
+    // switches under it. Six inline rows would make this the longest band in the
+    // menu for one gesture most people only ever use whole — the same length
+    // argument `menuGroup.textWidth` and `menuGroup.breaks` are flyouts for. It is
+    // NOT in Show beside the other view states, because Show holds STATES of the
+    // window and this is a set of five independent ones.
+    sub(
+      "menuGroup.formattingMarks",
+      "view.formattingMarks",
+      "view.formattingMarks.tab",
+      "view.formattingMarks.space",
+      "view.formattingMarks.paragraph",
+      "view.formattingMarks.lineBreak",
+      "view.formattingMarks.pageBreak",
+    ),
+    // Text width, a SUBMENU of four mutually exclusive steps, between Show and
+    // Zoom (`docs/154` §5.1, ADR-048). It is where Google Docs puts View ▸ Text
+    // width and where Word's Immersive Reader puts Column Width, and it is a
+    // flyout rather than four inline rows because four rows of one radio group
+    // would be the longest band in this menu for a single choice — the length
+    // complaint `sub` exists to answer. It is NOT in Show: Show holds view
+    // STATES, and this is a measure, which is the same distinction that keeps
+    // `view.reflow` out of Zoom.
+    sub(
+      "menuGroup.textWidth",
+      "view.textWidth.narrow",
+      "view.textWidth.reading",
+      "view.textWidth.fit",
+      "view.textWidth.wide",
+      "view.textWidth.full",
+    ),
+    band("menuGroup.zoom", "view.zoomIn", "view.zoomOut"),
+    // How the page itself is shown (`docs/153` shell.multiple-pages-view,
+    // shell.dark-document): ONLYOFFICE's View tab keeps both together. A
+    // flyout, so the two cost this menu one row.
+    // PDF layout joins it (owner, 2026-11-01, UX-051): how the pages are shown
+    // is the question both answer, and the View menu is at its 13-row cap
+    // (`menu-submenus.spec.mjs`), so the switch costs this menu no row. The two
+    // rows are radio items, the current layout checked, disabled with the
+    // reason for a document that is not a PDF. File ▸ PDF keeps its rows.
+    sub("menuGroup.pageDisplay", "view.multiplePages", "view.darkDocument", "view.pdfLayout.flowing", "view.pdfLayout.exact"),
+  ],
+  // Word's Insert TAB group order, which ONLYOFFICE's Insert tab also follows:
+  // Tables | Illustrations | Links | Comments | Header & footer | Text |
+  // Symbols. The ten-row opening run this menu used to have — table, image,
+  // shape, text box, link, bookmark, three field rows and drop cap in one
+  // undifferentiated band — was the single worst instance of the owner's
+  // report.
+  //
+  // `insert.field.page` and `insert.field.date` sit beside `insert.field`, not
+  // inside the picker only: the Insert BAND gives those two kinds their own
+  // buttons (Word's Insert tab has Page Number and Date & Time; ONLYOFFICE's
+  // has both), and `insert-surface.spec.mjs` holds the ribbon and the MENU BAR
+  // at exact parity on the `insert.` namespace — a ribbon face with no menu row
+  // is the drift that guard exists to catch. The remaining four kinds stay
+  // picker-only and are reachable from the palette by name.
+  //
+  // Footnote and endnote are NOT here any more; they are References ▸ Notes,
+  // where Word, ONLYOFFICE and this editor's own References BAND already keep
+  // them. Docs files a footnote under Insert, and it is outvoted two to one —
+  // and outvoted a third time by our ribbon, which had the notes on References
+  // while the menu had them on Insert.
+  insert: [
+    band("menuGroup.table", "insert.table", "insert.tableDialog", "insert.textToTable", "insert.drawTable"),
+    // Breaks. A SUBMENU, because six rows of "… break" would make this menu long
+    // for a group nobody opens twice in a paragraph — the same argument the
+    // Export band makes on the File surface, and the shape ONLYOFFICE uses for
+    // the same six (`Toolbar.js:2382-2390`).
+    //
+    // The ids are `layout.*` because a break IS page setup — Word files them
+    // under Layout ▸ Page Setup — while Insert is where people look for them,
+    // which is exactly why the three running-content rows below are `layout.*`
+    // on this menu too. The menu home MATTERS and is not decoration: in compact
+    // chrome the ribbon is hidden, so a command with only a band face is
+    // palette-only there, which is the hole the References menu was added to
+    // close.
+    sub(
+      "menuGroup.breaks",
+      "layout.blankPage",
+      "layout.break.page",
+      "layout.break.column",
+      "layout.break.section.nextPage",
+      "layout.break.section.continuous",
+      "layout.break.section.evenPage",
+      "layout.break.section.oddPage",
+    ),
+    // Word's Insert > Pictures is ONE dropdown: This Device… / Online Pictures….
+    // The same two here, as a flyout, so the menu stays within
+    // `menu-submenus.spec.mjs`'s cap (Insert reached 14 top-level rows once
+    // #918 added the table rows).
+    sub("menuGroup.pictures", "insert.image", "insert.imageFromUrl"),
+    band("menuGroup.illustrations", "insert.shape", "insert.chart"),
+    // Content controls (`109` RM-34): Word's Developer ▸ Controls, as a submenu
+    // for the same reason Breaks is one — seven kinds and three actions.
+    sub(
+      "menuGroup.contentControls",
+      "controls.insert.richText",
+      "controls.insert.plainText",
+      "controls.insert.picture",
+      "controls.insert.checkbox",
+      "controls.insert.comboBox",
+      "controls.insert.dropDownList",
+      "controls.insert.date",
+      "controls.fill",
+      "controls.properties",
+      "controls.remove",
+    ),
+    band("menuGroup.links", "insert.link", "insert.bookmark"),
+    band("menuGroup.comments", "review.comment"),
+    sub(
+      "menuGroup.headerFooter",
+      "insert.header",
+      "insert.footer",
+      "layout.firstPageVariant",
+      "layout.evenOddVariant",
+      // Link to Previous and Remove, per band (HF-192, RM-23): Word's Header &
+      // Footer tab and ONLYOFFICE's header menu (`mniRemoveHeader`) both carry
+      // them beside Edit header; in compact chrome this menu is their home.
+      "layout.header.linkToPrevious",
+      "layout.footer.linkToPrevious",
+      "layout.header.remove",
+      "layout.footer.remove",
+      "layout.headerFooterSettings",
+    ),
+    // ONLYOFFICE's Insert ▸ Page Number gallery and Word's Top / Bottom of Page:
+    // the six positions. "At the cursor" is the Fields submenu's Page number.
+    sub(
+      "menuGroup.pageNumbers",
+      "layout.pageNumber.topLeft",
+      "layout.pageNumber.topCenter",
+      "layout.pageNumber.topRight",
+      "layout.pageNumber.bottomLeft",
+      "layout.pageNumber.bottomCenter",
+      "layout.pageNumber.bottomRight",
+      "layout.pageNumber.pageOfTotal",
+    ),
+    // Text from file (`docs/153` page.textFromFile): Word's Insert ▸ Text ▸ Object ▸
+    // Text from File, in the Text group.
+    band("menuGroup.text", "insert.textbox", "insert.dropCap", "insert.textFromFile"),
+    sub("menuGroup.fields", "insert.field", "insert.field.page", "insert.field.date"),
+    // RM-19: Word keeps the non-breaking space beside Symbol, under Special Characters.
+    // Alt+X (`docs/153` text.unicode-code-toggle) beside Symbol: the other way to type a character by its code.
+    sub("menuGroup.symbols", "insert.symbol", "insert.emoji", "insert.nonBreakingSpace", "insert.symbolByCode"),
+  ],
+  // The References menu, which the compact chrome did not have at all.
+  //
+  // This is the hole compact mode had that no guard could see: the table of
+  // contents, captions and cross-references live on the References BAND, the
+  // ribbon is hidden in compact mode, and the menu bar offered none of them —
+  // so in the chrome the owner was looking at, a whole tab's worth of
+  // capability was reachable only by typing its name into the palette. The
+  // one-axis reachability guard counts the ribbon whichever chrome is showing,
+  // which is why it stayed green over a real gap.
+  //
+  // Its bands are the References BAND's own groups, by the same names:
+  // Navigation | Notes | Captions. Word's References tab reads Table of
+  // Contents | Footnotes | Captions, and ONLYOFFICE's reads Table of Contents |
+  // Footnotes | Caption — the same three, in the same order.
+  references: [
+    band(
+      "menuGroup.navigation",
+      "reference.tableOfContents",
+      "reference.updateFields",
+      "reference.removeToc",
+      "reference.goToHeading",
+    ),
+    band("menuGroup.notes", "insert.footnote", "insert.endnote", "reference.noteSettings", "reference.convertNotes"),
+    // Word's Next Footnote split button: four rows of one gesture, as a flyout.
+    sub(
+      "menuGroup.goToNote",
+      "reference.nextFootnote",
+      "reference.previousFootnote",
+      "reference.nextEndnote",
+      "reference.previousEndnote",
+    ),
+    band(
+      "menuGroup.captions",
+      "reference.caption",
+      "reference.crossReference",
+      "reference.tableOfFigures",
+      "reference.updateCaptionNumbers",
+    ),
+  ],
+  // Word's Home tab reads Font | Paragraph | Styles, and Docs' Format menu reads
+  // Text | Align & indent | Line & paragraph spacing | Bullets & numbering |
+  // Clear formatting. Both put CLEAR FORMATTING in a band of its own at the end;
+  // it used to sit here next to superscript and subscript, where it reads as one
+  // more character effect rather than as the row that throws the others away.
+  //
+  // Colour is split out of Word's single Font group deliberately. Word can hold
+  // ten controls in one group because they are a grid of icons; a menu renders
+  // them as ten stacked rows, which is the shape this change exists to stop.
+  format: [
+    sub(
+      "menuGroup.font",
+      "format.character.dialog",
+      "format.bold",
+      "format.italic",
+      "format.underline",
+      "format.strike",
+      "format.superscript",
+      "format.subscript",
+      "format.grow",
+      "format.shrink",
+    ),
+    sub("menuGroup.textColor", "format.color", "format.highlight"),
+    sub(
+      "menuGroup.changeCase",
+      "format.case.upper",
+      "format.case.lower",
+      "format.case.title",
+      "format.case.sentence",
+      "format.case.toggle",
+    ),
+    sub(
+      "menuGroup.alignment",
+      "paragraph.align.start",
+      "paragraph.align.center",
+      "paragraph.align.end",
+      "paragraph.align.justify",
+    ),
+    // Checklist, restart and continue existed on the ribbon and in the palette
+    // but in no menu, so browsing Format said the editor had no checklists at
+    // all (docs/104 HF-076).
+    sub(
+      "menuGroup.lists",
+      "paragraph.list.bullet",
+      "paragraph.list.numbered",
+      "paragraph.list.checklist",
+      "paragraph.list.restart",
+      "paragraph.list.continue",
+      "paragraph.list.settings",
+    ),
+    // Tab stops join the paragraph band because that is where Word keeps them —
+    // the Tabs… dialog opens off the Paragraph launcher on both Home and Layout
+    // — and because they are a paragraph property, which is what the band means.
+    //
+    // It is filed here for a reason that is not the phone's. `setTabStop` had
+    // exactly two call sites, both inside `ruler.mjs`, and no command id: the
+    // ruler was the ONLY surface in the product from which a tab stop could be
+    // set, moved, retyped or removed, at every width, for every user. That is a
+    // one-surface capability (`docs/105` UX-004) and it has been one all along;
+    // the phone rung is only where it became visible, because a ruler showing
+    // 0-3in of an 8.5in page is 24px of a 844px screen spent on a control
+    // nobody drags with a finger. `docs/148` §9 item 7.
+    sub(
+      "menuGroup.paragraph",
+      "paragraph.indent.decrease",
+      "paragraph.indent.increase",
+      "layout.tabStops",
+      "layout.paragraph",
+    ),
+    // Copying formatting is a FORMAT action — filing it under Edit put it next
+    // to cut/paste, where it reads as clipboard behaviour — and it belongs with
+    // the two style-from-selection rows, because all three are "take the
+    // formatting this selection already has and reuse it".
+    sub(
+      "menuGroup.styles",
+      "format.painter",
+      "style.updateFromSelection",
+      "style.createFromSelection",
+    ),
+    band("menuGroup.clearFormatting", "format.clear"),
+  ],
+  // Every structural table command already ran through `tableToolCommands` and
+  // was reachable from the right-click menu and the palette — and from no menu
+  // at all (docs/105 UX-012), so a user browsing the bar was told the editor
+  // could not edit tables. The rows below are the SAME command objects, so
+  // gating, disabled reasons and the transactions they run cannot drift.
+  //
+  // The band names are Word's own Table Layout tab: Rows & Columns | Merge |
+  // Cell Size | Data (sort). Deleting keeps the band it already had, which is
+  // the safety rule above: "Delete table" must not sit one row under "Insert
+  // column right".
+  table: [
+    sub(
+      "menuGroup.rowsAndColumns",
+      "table.insert.rowAbove",
+      "table.insert.rowBelow",
+      "table.insert.columnLeft",
+      "table.insert.columnRight",
+      "table.insertCells",
+    ),
+    sub("menuGroup.delete", "table.delete.row", "table.delete.column", "table.delete.table", "table.deleteCells"),
+    // Reordering. The gutter's drag is the pointer half (`docs/141` §4.2.3) and
+    // these are the half a keyboard, a menu and the palette can reach — the rule
+    // every other gesture in that layer already follows.
+    sub(
+      "menuGroup.move",
+      "table.move.rowUp",
+      "table.move.rowDown",
+      "table.move.columnLeft",
+      "table.move.columnRight",
+    ),
+    sub("menuGroup.select", "table.select.row", "table.select.column", "table.select.table"),
+    // Merge, then the two ways out of one. `table.unmerge` is the gesture Word
+    // and Google Docs both put on the right-click menu of a merged cell, and it
+    // had no reachable path at all: the split dialog's smallest legal value is
+    // 1x2, so no number a person could type unmerged a cell (`docs/141` TBL-02).
+    // Split Table sits with the merges, as in Word's Layout ▸ Merge group.
+    sub("menuGroup.merge", "table.merge", "table.unmerge", "table.split", "table.splitTable"),
+    // Sizing the caret's band from the keyboard. These are the ONLY table
+    // commands with a chord (Alt+Shift+Arrow), and they are on the menu as well
+    // because a chord is not a surface a user browses. Distributing rows and
+    // columns is the same question — how big is this band — so Word's Cell Size
+    // group holds both, and so does this one.
+    sub(
+      "menuGroup.cellSize",
+      "table.column.grow",
+      "table.column.shrink",
+      "table.row.grow",
+      "table.row.shrink",
+      "table.distribute.rows",
+      "table.distribute.columns",
+    ),
+    // Convert to Text is in Word's Data group, beside Sort.
+    band("menuGroup.sort", "table.sort.ascending", "table.sort.descending", "table.convertToText"),
+    // `table.borderStyle` sits with the other two format rows, which is where
+    // Word keeps the pen: Table Design holds Line Style beside the border
+    // controls rather than in a submenu of its own. It had three surfaces --
+    // the cell-format popover, the in-table context menu and the palette --
+    // and not this one, which is the single-surface shape `105` UX-012 is
+    // about: the menu is the surface a reader browses when they do not already
+    // know the capability exists.
+    band(
+      "menuGroup.properties",
+      "table.cellFormat",
+      "table.borderStyle",
+      "table.properties",
+    ),
+    // Cell text direction: Word's Layout ▸ Alignment ▸ Text Direction, one
+    // submenu so the menu stays within a screenful (menu-submenus).
+    sub(
+      "table.tools.directionSubmenu",
+      "table.textDirection.horizontal",
+      "table.textDirection.rotateDown",
+      "table.textDirection.rotateUp",
+    ),
+    // Clearing the table style. The named styles are generated per document, so
+    // they cannot be listed here — the ribbon's chooser and the palette's
+    // `table.style.<name>` rows are their two surfaces — but "back to no style"
+    // is a fixed command and the Table menu is where Word keeps it.
+    // The six Table Style Options sit with the style they tune, Word's Table
+    // Design order.
+    band(
+      "menuGroup.style",
+      "table.style.none",
+    ),
+    // Word's Table Style Options group, as one submenu (menu-submenus).
+    sub(
+      "table.tools.lookSubmenu",
+      "table.look.headerRow",
+      "table.look.firstColumn",
+      "table.look.totalRow",
+      "table.look.lastColumn",
+      "table.look.bandedRows",
+      "table.look.bandedColumns",
+    ),
+  ],
+  // Word's Review tab order, which ONLYOFFICE's also follows: Proofing first,
+  // then Comments, then Tracking, then Changes. Proofing led this menu in
+  // neither reference before — it was last, under three bands of change
+  // navigation — and it is the band a person opens Review for most often.
+  //
+  // Accept-all and reject-all are their own band. They were one row below
+  // "Accept change and move to next", which is an irreversible whole-document
+  // action one keystroke from a single-change one.
+  review: [
+    // Proofing. Word's Review tab opens with a Proofing group, and these three
+    // are the only proofing switches this editor has. They were the content of
+    // a `Tools` menu that existed for them alone.
+    // Increment B adds a fourth row: the language-pack install surface
+    // (`docs/146` §3/§10, ADR-042). Word keeps its install table in File ▸ Options
+    // ▸ Language and this editor has no Options backstage, so the Proofing band —
+    // where the switches already are — is the menu home, and the Review band and
+    // the palette are its other two surfaces (`105` UX-004 forbids one).
+    sub(
+      "menuGroup.proofing",
+      "tools.spellCheck",
+      "tools.grammarCheck",
+      "tools.smartQuotes",
+      "tools.autoFormatLists",
+      "tools.autocorrect",
+      // RM-19: the remaining AutoCorrect switches and the dialog holding them all.
+      "tools.autoCapitalise",
+      "tools.autoFormatDashes",
+      "tools.autoFormatHyperlink",
+      "tools.autoCorrectOptions",
+      "tools.languages",
+      // Word's Custom Dictionaries ▸ Edit Word List (`docs/153` review.personal-dictionary-manage).
+      "tools.personalDictionary",
+      // RM-42: Word's Review ▸ Language ▸ Set Proofing Language.
+      "format.language",
+      // HF-051: Word's Review ▸ Proofing ▸ Word Count.
+      "tools.wordCount",
+      // HF-064: Word's Review ▸ Accessibility ▸ Check Accessibility.
+      "tools.checkAccessibility",
+    ),
+    band("menuGroup.comments", "review.comment.resolve", "review.comment.delete"),
+    band("menuGroup.tracking", "review.toggle"),
+    // Display for review (`docs/153` review.display-mode-*): Word's Tracking-group
+    // dropdown of four, as a flyout so four rows of one choice cost one row here.
+    sub(
+      "menuGroup.displayForReview",
+      "review.displayMode.simpleMarkup",
+      "review.displayMode.allMarkup",
+      "review.displayMode.noMarkup",
+      "review.displayMode.original",
+    ),
+    sub(
+      "menuGroup.changes",
+      "review.previous",
+      "review.next",
+      "review.acceptNext",
+      "review.rejectNext",
+    ),
+    band("menuGroup.allChanges", "review.acceptAll", "review.rejectAll"),
+    // Compare, last on the Review menu, which is where Word keeps it: their
+    // Review tab reads Proofing | Comments | Tracking | Changes | Compare, and
+    // Compare is the rightmost group. ONLYOFFICE files theirs under
+    // Collaboration ▸ Compare behind `canReview`.
+    band("menuGroup.compare", "review.compare"),
+    // Protect, its own band and last, which is Word 365's own Review-tab order
+    // (… Changes | Compare | Protect | Ink). Its own band rather than a row under
+    // Compare because the rule every band in these menus follows is that a
+    // document-wide, hard-to-notice action does not sit one keystroke from a
+    // reversible navigation one.
+    // Protect holds BOTH authority questions, which is the grouping Word's own
+    // Review tab uses: what this document asks of everyone (`restrictEditing`,
+    // `w:documentProtection`) and what the people in a shared session may do
+    // (`manageAccess`). They are genuinely different authorities — `access.rs`
+    // is built on keeping them apart — and they are the same QUESTION to a
+    // reader looking for "who can change this", which is what a menu band is
+    // for. A band of its own would have cost a new `menuGroup.*` key in
+    // nineteen catalogues to separate two rows nobody is looking for
+    // separately.
+    band("menuGroup.protect", "review.restrictEditing", "review.protectForm", "forms.roles", "review.manageAccess", "collab.recover", "collab.downloadRetained"),
+  ],
+};
+
+// Menu labels for the table rows. `tableToolCommands` supplies behaviour; only
+// the LABEL differs by surface. The palette needs its "Table:" prefix because it
+// is one flat global list, while a row inside the Table menu already has that
+// noun from the menu it sits in. This map is explicit rather than derived from
+// the submenu trail because the trails do not compose into readable text
+// ("Delete Delete row", "Autofit & sort Distribute rows"). `menu-taxonomy`
+// fails if this map and the command set disagree in either direction.
+export const TABLE_MENU_LABELS = new Map([
+  ["table.insert.rowAbove", "Insert row above"],
+  ["table.insert.rowBelow", "Insert row below"],
+  ["table.insert.columnLeft", "Insert column left"],
+  ["table.insert.columnRight", "Insert column right"],
+  ["table.delete.row", "Delete row"],
+  ["table.delete.column", "Delete column"],
+  ["table.delete.table", "Delete table"],
+  ["table.move.rowUp", "Move row up"],
+  ["table.move.rowDown", "Move row down"],
+  ["table.move.columnLeft", "Move column left"],
+  ["table.move.columnRight", "Move column right"],
+  ["table.select.row", "Select row"],
+  ["table.select.column", "Select column"],
+  ["table.select.table", "Select table"],
+  ["table.merge", "Merge cells"],
+  ["table.unmerge", "Unmerge cells"],
+  ["table.split", "Split cell…"],
+  ["table.distribute.rows", "Distribute rows"],
+  ["table.distribute.columns", "Distribute columns"],
+  ["table.sort.ascending", "Sort ascending"],
+  ["table.sort.descending", "Sort descending"],
+  ["table.column.grow", "Widen column"],
+  ["table.column.shrink", "Narrow column"],
+  ["table.row.grow", "Taller row"],
+  ["table.row.shrink", "Shorter row"],
+  ["table.cellFormat", "Cell formatting…"],
+  // Word's own wording, and an ellipsis because the row opens a dialog.
+  ["table.borderStyle", "Borders and shading…"],
+  ["table.properties", "Table properties…"],
+  ["table.style.none", "No table style"],
+  // The table tools (`table_tools.mjs`). Their menu words are also catalogue
+  // entries (`TABLE_MENU_LABEL_KEYS`), so a translated build shows them in its
+  // own language; the English here is what a build without a catalogue shows.
+  ["table.insertCells", "Insert cells…"],
+  ["table.deleteCells", "Delete cells…"],
+  ["table.splitTable", "Split table"],
+  ["table.convertToText", "Convert to text…"],
+  ["table.textDirection.horizontal", "Horizontal text"],
+  ["table.textDirection.rotateDown", "Rotate text down"],
+  ["table.textDirection.rotateUp", "Rotate text up"],
+  ["table.look.headerRow", "Header row"],
+  ["table.look.firstColumn", "First column"],
+  ["table.look.totalRow", "Total row"],
+  ["table.look.lastColumn", "Last column"],
+  ["table.look.bandedRows", "Banded rows"],
+  ["table.look.bandedColumns", "Banded columns"],
+]);
+
+/** The catalogue key for a Table menu row whose words are routed. Only the table
+ *  tools have one; the older rows are English debt this map does not add to. */
+export const TABLE_MENU_LABEL_KEYS = new Map([
+  ["table.borderStyle", "table.bordersShadingCommand"],
+  ["table.insertCells", "table.tools.insertCellsCommand"],
+  ["table.deleteCells", "table.tools.deleteCellsCommand"],
+  ["table.splitTable", "table.tools.splitTableCommand"],
+  ["table.convertToText", "table.tools.convertToTextCommand"],
+  ["table.textDirection.horizontal", "table.textDirection.horizontal"],
+  ["table.textDirection.rotateDown", "table.textDirection.rotateDown"],
+  ["table.textDirection.rotateUp", "table.textDirection.rotateUp"],
+  ["table.look.headerRow", "table.look.headerRow"],
+  ["table.look.firstColumn", "table.look.firstColumn"],
+  ["table.look.totalRow", "table.look.totalRow"],
+  ["table.look.lastColumn", "table.look.lastColumn"],
+  ["table.look.bandedRows", "table.look.bandedRows"],
+  ["table.look.bandedColumns", "table.look.bandedColumns"],
+]);
+
+/** A Table menu row's words: its catalogue entry when it has one and the
+ *  catalogue answers it, else the map's English. O(1). */
+export function tableMenuLabel(id) {
+  const key = TABLE_MENU_LABEL_KEYS.get(id);
+  return key && has(key) ? t(key) : TABLE_MENU_LABELS.get(id);
+}
+
+/** The menu names the bar offers, in bar order. */
+export function appMenuNames() {
+  return Object.keys(APP_MENU_SECTIONS);
+}
+
+/** Every command id the named menu offers, flattened out of its named bands
+ *  and in the order the popover renders them. An unknown menu name gives `[]`,
+ *  which is what `renderAppMenu` already does with one. */
+export function menuCommandIds(name) {
+  return sectionCommandIds(APP_MENU_SECTIONS[name] ?? []);
+}
+
+/** Every command id a list of bands holds, in render order. The one place that
+ *  knows a band is `{nameKey, ids}` and not a bare array, so a surface that
+ *  needs the flat roster — the compact toolbar's Table dropdown, the parity
+ *  guards — never has to know either. */
+export function sectionCommandIds(sections) {
+  return sections.flatMap((section) => section.ids);
+}
+
+/** Every band in every menu, tagged with the menu it belongs to. What the
+ *  grouping guards walk: they ask about bands across the whole bar, and doing
+ *  that by hand needed a nested loop in each of them. */
+export function allMenuSections() {
+  return appMenuNames().flatMap((menu) =>
+    (APP_MENU_SECTIONS[menu] ?? []).map((section) => ({ menu, ...section })),
+  );
+}
+
+/** Every command id the bar offers, across all menus, in bar order. */
+export function allMenuCommandIds() {
+  return appMenuNames().flatMap((name) => menuCommandIds(name));
+}
+
+/**
+ * `id → [menu, ...]`, one entry per OCCURRENCE.
+ *
+ * Per occurrence rather than per menu on purpose: one command has one menu
+ * home, and listing an id twice inside the SAME menu is the same defect as
+ * listing it in two — the bar answers the same question twice and stops being
+ * a map of where things live.
+ */
+export function menuHomes() {
+  const homes = new Map();
+  for (const name of appMenuNames()) {
+    for (const id of menuCommandIds(name)) {
+      if (!homes.has(id)) homes.set(id, []);
+      homes.get(id).push(name);
+    }
+  }
+  return homes;
+}
+
+/**
+ * Flattens a nested command tree (submenus and all) into flat surface rows.
+ *
+ * Both the table rows and the object rows needed this, and both had grown
+ * their own copy of it inside `editorCommands`. They had to: a palette row
+ * whose `run` is a submenu is a dead row, so a flat surface has to walk the
+ * tree and keep the parent's name in the label. One copy, so the next
+ * contextual family cannot reintroduce the dead-parent row a third time.
+ *
+ * @param {Array} entries the tree, as the context-menu builders produce it.
+ * @param {(entry: object, trail: string) => object} describe supplies the
+ *   surface-specific `{label, group, kw}`; `trail` is the parent names joined
+ *   with spaces, `""` at the top level.
+ * @param {string} [trail] internal — the accumulated parent trail.
+ * @returns {Array} leaf rows carrying the ORIGINAL `enabled`, `disabledReason`
+ *   and `run`, so gating and the transactions they run cannot drift by surface.
+ */
+export function flattenCommandTree(entries, describe, trail = "") {
+  return entries.flatMap((entry) =>
+    entry.submenu
+      ? flattenCommandTree(entry.submenu, describe, trail ? `${trail} ${entry.label}` : entry.label)
+      : [{
+        id: entry.id,
+        ...describe(entry, trail),
+        enabled: entry.enabled,
+        disabledReason: entry.disabledReason,
+        run: entry.run,
+      }],
+  );
+}
+
+/**
+ * A table command's label on `surface`.
+ *
+ * In the Table MENU the noun is already supplied by the menu the row sits in,
+ * so the palette's "Table:" prefix would read as a stutter. Everywhere else the
+ * palette is one flat global list and the row has to name its own subject.
+ */
+export function tableCommandLabel(id, label, trail, surface) {
+  if (surface === "menu" && TABLE_MENU_LABELS.has(id)) return tableMenuLabel(id);
+  return trail ? `Table: ${trail} ${label}` : `Table: ${label}`;
+}
+
+/**
+ * The Table menu's rows when the caret is not in a table: every row present and
+ * disabled, with the reason.
+ *
+ * Building the menu only from a live table context meant browsing to Table with
+ * the caret in a paragraph opened an EMPTY popover — which says the editor
+ * cannot edit tables, the same thing having no Table menu at all said (UX-012).
+ * Word and Docs both show the rows greyed with the reason. The labels come from
+ * the same map the live rows use, so the placeholders cannot drift away from
+ * the commands they stand in for.
+ */
+export function tableMenuPlaceholders(disabledReason) {
+  return [...TABLE_MENU_LABELS].map(([id]) => {
+    const label = tableMenuLabel(id);
+    return {
+    id,
+    label,
+    group: "Table",
+    kw: `table ${tableMenuLabel(id)}`.toLowerCase(),
+    enabled: false,
+    disabledReason,
+    run: () => {},
+    };
+  });
+}
+
+// ---- What a command OPENS, and the ellipsis that says so (audit DIALOGS-16) --
+//
+// Word and Google Docs end a command's label with "…" when it does not act at
+// once but opens a surface where you finish it: a dialog, or a picker (a
+// gallery, a grid, a popover asking for a value). A command that opens a PANE
+// beside the document does not take one: the pane is a place you go, not a
+// question asked before the command acts. The audit found both halves broken:
+// Page setup, Watermark, Table of contents, Insert caption, Cross-reference,
+// Keyboard shortcuts and Document properties opened dialogs with no "…", while
+// Paragraph properties and Table properties opened panes with one.
+//
+// The rule is DATA, declared per command: `command_ellipsis.test.mjs` reads every
+// label in the source and fails when a declared dialog or picker lacks "…", when
+// a pane or an immediate command has one, or when an entry here names a command
+// no surface labels. A command that opens a dialog is declared here in the commit
+// that adds it.
+export const COMMAND_OPENS = new Map([
+  // Dialogs.
+  ...[
+    "file.open", "file.recoverDrafts", "file.compatibilityReport", "file.properties",
+    "layout.pageSetup", "layout.margins", "layout.orientation", "layout.size", "layout.columns",
+    "layout.watermark", "layout.headerFooterSettings", "layout.tabStops",
+    "insert.tableDialog", "insert.textToTable", "insert.bookmark", "insert.field", "insert.dropCap",
+    "insert.imageFromUrl", "insert.textFromFile",
+    "reference.tableOfContents", "reference.caption", "reference.crossReference", "reference.updateFields",
+    "review.restrictEditing", "review.compare",
+    "tools.autoCorrectOptions", "tools.checkAccessibility", "tools.wordCount", "tools.languages",
+    "tools.personalDictionary", "format.language", "style.createFromSelection",
+    "help.shortcuts", "object.altText", "table.cellFormat", "table.borderStyle",
+  ].map((id) => [id, "dialog"]),
+  // Pickers: a gallery, grid or popover that asks for a value first.
+  ...[
+    "insert.table", "insert.image", "insert.shape", "insert.symbol", "insert.emoji",
+    "format.family", "format.size", "format.color", "format.highlight",
+    "view.zoom", "help.commands",
+    // Every route to a link opens the link popover first (`docs/184` D-13).
+    "insert.link", "link.add", "link.edit",
+  ].map((id) => [id, "picker"]),
+  // Panes: no ellipsis. Indentation and Paragraph spacing open the Paragraph
+  // properties pane on their own field, the same pane `paragraph.properties` opens.
+  ...[
+    "paragraph.properties", "layout.paragraph", "layout.indent", "layout.spacing",
+    "table.properties", "object.properties",
+    "chart.settings", "file.versionHistory",
+  ].map((id) => [id, "pane"]),
+]);
+
+/** Whether a label for `id` must end in "…" (Word/Docs: it opens a dialog or a
+ *  picker), from `COMMAND_OPENS`. */
+export function labelTakesEllipsis(id) {
+  const opens = COMMAND_OPENS.get(id);
+  return opens === "dialog" || opens === "picker";
+}

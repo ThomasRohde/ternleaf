@@ -1,0 +1,1220 @@
+// SPDX-License-Identifier: Apache-2.0
+// THE HOST CONTRACT: one schema, from which both transports are built.
+//
+// `docs/126` phase 2. A host gets a typed way to command the editor and to be
+// told what happened, and it must be IDENTICAL whether they hold a reference to
+// the editor or are talking to it across an iframe boundary. Two
+// hand-maintained surfaces drift, and this repository has the receipts: the
+// `shortcut:` labels and the key bindings were two tables that disagreed until
+// `109` UX-006 made them one, and `one-axis-navigation.spec.mjs`'s
+// `VALUE_FAMILIES` is *currently* a second copy of the `data-command-family`
+// declarations in `ribbon_faces.mjs`.
+//
+// So this file is the only place that knows:
+//
+//   * what a command REQUIRES of the host's grant (`COMMAND_CONTRACT`,
+//     `COMMAND_FAMILIES`);
+//   * which events exist and what each one carries (`HOST_EVENTS`);
+//   * what a refusal can say (`REFUSAL_CODES`);
+//   * the shape of a `postMessage` envelope (`PROTOCOL`);
+//   * which origins may speak to the editor (`originAllowed`).
+//
+// `host_session.mjs` (the in-process transport) gates and dispatches from it.
+// `host_bridge.mjs` (the editor side of `postMessage`) and `host_client.mjs`
+// (the host side) build their whole message surface from it. Neither transport
+// carries a command list, an event list or a refusal code of its own — which is
+// what makes "adding a command to one without the other" a build failure rather
+// than a half-reachable API.
+//
+// WHY A COMMAND ID IS THE UNIT. The editor already has a command registry
+// reached by id: `runCommandById` and `keymap.mjs` landed with `109` UX-006, and
+// #626 gave 111 ribbon controls a `data-command`. A command id is therefore
+// already the unit of reachability in this product, and inventing a second
+// addressing scheme for hosts would be the drift above in a new costume.
+//
+// THE ADDRESSING RULE, and why families exist. Most command ids are literals.
+// Some name a VALUE of a control — `format.family.Georgia`,
+// `paragraph.listFormat.decimal`, `style.Heading 1`, `view.zoom.150` — and those
+// sets are generated from the document, from the font inventory or from markup,
+// so they are not enumerable in a table at all. Measured in a browser on the
+// `rich` fixture, the registry offered 214 ids, of which 93 were values of ten
+// such families, and the font inventory itself differed between two reads of the
+// same document. A table of 214 literals would therefore be wrong on arrival.
+// So a command resolves EXACTLY first and by FAMILY PREFIX second — the same two
+// kinds `ribbon_faces.mjs` already distinguishes as `data-command` and
+// `data-command-family`, rather than a third vocabulary.
+//
+// Pure: no DOM, no engine, no `t()`. Every user-facing sentence a refusal
+// carries is an INPUT, because a module that takes its labels as arguments adds
+// no string debt (`docs/124`), and because the reasons a command is unavailable
+// are the ones the chrome already localised.
+import { editingModeFor } from "./capabilities.mjs";
+
+/** The contract's version, carried on every `ready` event and every envelope.
+ *
+ *  A host pins against this. It is bumped when a command's `requires` changes
+ *  meaning, an event's payload loses a field, or the envelope shape changes —
+ *  never for an added command, an added event or an added refusal code, which
+ *  are all additive by `docs/05` §12. */
+export const CONTRACT_VERSION = 1;
+
+/** What a command can ask of the host's grant.
+ *
+ *  `mutate` is not a capability: it is the question "may this page change the
+ *  document at all", and `capabilities.mjs` already answers it — `editingModeFor`
+ *  returns `viewing` exactly when neither `edit` nor `comment` was granted. That
+ *  matters because a `commentor` MUST be able to run `format.bold`: the editor
+ *  records it as a tracked suggestion, which is the whole point of the role. So
+ *  `mutate` resolves through the Phase 1 authority rather than through a second
+ *  copy of its rule. Everything else is a capability name, checked directly. */
+export const REQUIREMENTS = Object.freeze([
+  "mutate",
+  "edit",
+  "comment",
+  "save",
+  "download",
+  "print",
+  "open",
+  "new",
+  "autosave",
+]);
+
+/** Everything a refusal can say, as a code a host can branch on.
+ *
+ *  A code, not a sentence: the sentence is localised and belongs to the chrome,
+ *  and a host writing `if (result.refusal.code === "capability-withheld")` must
+ *  not be matching on English. `109` UX-017 gave the editor one feedback channel
+ *  and `status_channel.mjs` already distinguishes a refusal from a confirmation;
+ *  these are the machine-readable half of the same distinction.
+ *
+ *    unknown-command      no such id in the registry, in this state
+ *    capability-withheld  the host did not grant what the command requires
+ *    unavailable          the command exists but cannot run right now, and the
+ *                         chrome's own reason says why ("Nothing to undo")
+ *    engine-refused       it ran and the engine refused it — Viewing mode, a
+ *                         read-only document — reported through the status
+ *                         channel rather than guessed at
+ *    threw                the command raised; the message is the exception's
+ *    bad-request          the envelope or the arguments were not the contract's
+ *    timeout              the transport gave up waiting (client side only)
+ *    identity-invalid     `identify` was handed an identity outside the `docs/175`
+ *                         §3 bounds; the refusal's `field` names which part
+ *    identity-fixed       `identify` came a second time, or after a room was
+ *                         joined: an identity is decided once per mount (§3.2)
+ */
+export const REFUSAL_CODES = Object.freeze([
+  "unknown-command",
+  "capability-withheld",
+  "unavailable",
+  "engine-refused",
+  "threw",
+  "bad-request",
+  "timeout",
+  "identity-invalid",
+  "identity-fixed",
+]);
+
+/** Every event a host can hear, and the exact fields its detail carries.
+ *
+ *  `docs/126` phase 2 names the minimum set; `refusal` is in it because the
+ *  editor's whole feedback design funnels through one channel and a host that
+ *  cannot hear a refusal will re-issue it forever.
+ *
+ *  `change` carries a REVISION HANDLE, never a snapshot. `docs/107` §4 makes
+ *  per-interaction work O(1) in document size an owner constraint, and an event
+ *  that serialises the document on every keystroke is a defect however fast it
+ *  feels on a fixture. A host that wants the bytes asks for them; a host that
+ *  wants to know something changed reads two integers. */
+export const HOST_EVENTS = Object.freeze([
+  Object.freeze({
+    name: "ready",
+    detail: Object.freeze(["contract", "capabilities", "editingMode", "commands"]),
+  }),
+  Object.freeze({ name: "change", detail: Object.freeze(["revision", "dirty"]) }),
+  Object.freeze({ name: "selection", detail: Object.freeze(["anchor", "focus", "hasRange"]) }),
+  Object.freeze({ name: "save", detail: Object.freeze(["format", "name", "bytes"]) }),
+  Object.freeze({ name: "export", detail: Object.freeze(["format", "name", "bytes"]) }),
+  Object.freeze({ name: "error", detail: Object.freeze(["code", "message", "command"]) }),
+  Object.freeze({
+    name: "refusal",
+    detail: Object.freeze(["code", "command", "requires", "message"]),
+  }),
+  // The directory seam (`docs/175` §7), for a host that serves it over `postMessage`
+  // (`?directory=1`). The editor asks one bounded question — the text after `@`,
+  // and how many answers it will read — and never anything about the document.
+  Object.freeze({ name: "directory-query", detail: Object.freeze(["qid", "query", "limit"]) }),
+  // Sent only once the comment is ORDERED (acknowledged in a room, saved
+  // standalone): a mention that is later lost must not already have e-mailed anyone.
+  Object.freeze({
+    name: "mention",
+    detail: Object.freeze(["qid", "people", "commentId", "excerpt", "room"]),
+  }),
+  // The person decided on an assistant's private preview (`docs/181` §4.4):
+  // `decision` is `accepted` or `discarded`, `revision` the document revision after
+  // it, `reason` the refusal code when an Accept was refused. A host's assistant
+  // learns the outcome without polling, across a frame boundary too.
+  Object.freeze({ name: "ai-decision", detail: Object.freeze(["previewId", "decision", "revision", "reason"]) }),
+  // The host's model (`docs/183` §3.8), for a host that serves it over `postMessage`
+  // (`?aiProvider=host`). `kind` is `request` (with `request`, an OpenAI Chat
+  // Completions body, and `purpose`) or `cancel` (the person pressed Stop). Answered
+  // with `ai-provider.answer`, correlated by `qid`. Never carries a key.
+  Object.freeze({ name: "ai-provider", detail: Object.freeze(["qid", "kind", "request", "purpose"]) }),
+]);
+
+/** Event names alone, for validation and for generating a client's surface. */
+export const HOST_EVENT_NAMES = Object.freeze(HOST_EVENTS.map((event) => event.name));
+
+/** The `postMessage` protocol, in one object.
+ *
+ *  ONLYOFFICE's host API is the shape to learn from and the shape to improve on.
+ *  Read from their source rather than their docs: `DocsAPI.DocEditor` sends
+ *  `{command, data}` one way (`_sendCommand`,
+ *  `reference/web-apps/apps/api/documents/api.js:649-651`) and receives
+ *  `{event, frameEditorId, data}` the other (`_onMessage`, `:470-500`). There is
+ *  NO correlation id anywhere in it, so a command is fire-and-forget: a host
+ *  cannot learn whether what it asked for happened, or was refused. That is the
+ *  gap `rid` closes here, and it is why a refusal is part of a RESULT and not
+ *  only an event.
+ *
+ *  Their transport also posts to a wildcard target — `wnd.postMessage(msg, "*")`
+ *  at `:1303-1306`, under a literal `// TODO: specify explicit origin` — and
+ *  their inbound filter carries `// TODO: check message origin` above the one
+ *  real check they do make (`:1014-1018`, `_scope.frameOrigin == msg.origin`).
+ *  Ours never posts to `"*"`; see `originAllowed`. */
+export const PROTOCOL = Object.freeze({
+  /** Present on every envelope, and equal to the protocol version. A message
+   *  without it is not ours: a page may host many frames and many libraries, and
+   *  a bridge that answers anything shaped vaguely right is an attack surface. */
+  marker: "opendoc",
+  version: 1,
+  /** Envelope kinds, one per direction of travel. */
+  kinds: Object.freeze(["request", "result", "event"]),
+  /** What a host may ask for, and deliberately the same verbs the in-process
+   *  session exposes as methods — `describe`, `execute`, `query`, `ping` and
+   *  `identify` (`docs/175` §3.2, once per mount) — so neither transport has a
+   *  verb the other lacks. */
+  //  `directory.answer` and `mention.answer` are the host's half of the directory
+  //  seam (`docs/175` §7.2): answers to the editor's `directory-query` and
+  //  `mention` events, correlated by `qid`. One line: `host_parity.rs` reads it as one.
+  //  `ai` is the in-page assistant's door (`docs/178` §9, `docs/181` §4.4): one verb whose
+  //  `method` is one of `AI_METHODS`, so the assistant's surface grows without new verbs.
+  //  `ai-provider.answer` is the host's half of the provider channel (`docs/183` §3.8): a
+  //  `chunk`, the `response` or an `error` for an `ai-provider` request, by `qid`.
+  requests: Object.freeze(["describe", "execute", "query", "ping", "identify", "directory.answer", "mention.answer", "ai", "ai-provider.answer"]),
+});
+
+/** What the `ai` verb can be asked, as `session.ai.<method>(...)` in process and
+ *  `{type: "ai", method, args}` over `postMessage` (`docs/178` §9, `docs/181` §4.4).
+ *
+ *    read      the assistant's reads: `{tool: "outline" | "read" | "search" |
+ *              "trackedChanges" | "comments", ...}`, anchored as `opendoc.ai` reads are
+ *    preview   compile an edit plan and show it to the person PRIVATELY, with Accept
+ *              and Discard; nothing reaches the document, the undo stack or a room
+ *    apply     compile and commit at once (suggestions unless the host granted direct
+ *              edits), without the panel: `opendoc.ai`'s `apply`
+ *    accept    the person's Accept, for a host that drives its own button
+ *    discard   the person's Discard (or the host withdrawing its proposal)
+ *    access    what this mount lets an assistant do: `none`, `read`, `comment`,
+ *              `suggest` or `review`, and whether direct edits were granted
+ *
+ *  Every answer is a value, `{ok, ...}` or `{ok: false, refusal}`, like `execute`'s. */
+export const AI_METHODS = Object.freeze(["read", "preview", "apply", "accept", "discard", "access"]);
+
+/** A command whose id is a literal: `{ id, requires, args }`.
+ *
+ *  `requires` is the ONE fact this table adds to the registry, and it is the
+ *  fact the registry cannot supply: the registry knows whether a command can run
+ *  *right now* (`enabled`, `disabledReason`), which is state; the contract knows
+ *  whether this host may *ever* run it, which is composition. `docs/126`'s
+ *  container policy draws exactly that line — "never, for you" versus "not right
+ *  now".
+ *
+ *  `args` is declared only where the registry's `run` actually takes one. Three
+ *  do: `view.zoom` takes a percentage, and the two colour commands take an
+ *  anchor element that no host can send across a frame boundary, so they are
+ *  declared with no args and a host gets the popover at its default position. */
+const exact = (id, requires, args = []) => Object.freeze({ id, requires, args: Object.freeze(args) });
+
+/** A family of value commands: `{ prefix, requires }`.
+ *
+ *  A family's members are generated from the document, the font inventory or
+ *  markup, so the contract declares the PREFIX and what it requires. `state`
+ *  names the editor state in which the family has members at all, so the parity
+ *  guard can drive that state rather than skipping the family and passing having
+ *  checked nothing — which is how a guard whose fixture cannot exercise its path
+ *  ships green. */
+const family = (prefix, requires, state) => Object.freeze({ prefix, requires, state });
+
+/** Editor states a family can need. The guard drives every one of them. */
+export const FAMILY_STATES = Object.freeze(["always", "caret", "table", "object"]);
+
+/** Every command id the contract knows literally.
+ *
+ *  Grouped by namespace, in the order `docs/05` §6 declares the namespaces. A
+ *  row's `requires` is a claim about the product, so the interesting ones carry
+ *  their reasoning; the repetitive ones do not, because a comment per bold
+ *  button is noise.
+ */
+export const COMMAND_CONTRACT = Object.freeze([
+  // ---- file ---------------------------------------------------------------
+  // The five file capabilities are the ones a host most often wants to withhold
+  // one at a time — `docs/126`'s container policy: "comments only, everything
+  // else off" is a real configuration, not a rung on a ladder.
+  exact("file.new", "new"),
+  exact("file.open", "open"),
+  exact("file.save", "save"),
+  // Every export writes a file the visitor keeps, so all nine are the one
+  // `download` grant. Whether the ENGINE can write a given format is a different
+  // question and belongs to the registry's `enabled`/`disabledReason` — "not
+  // right now" — which is why `file.export.rtf` is declared here although RTF is
+  // import-only: the host's permission to download is not conditional on which
+  // writers this build happens to register.
+  exact("file.export.pdf", "download"),
+  exact("file.export.docx", "download"),
+  exact("file.export.dotx", "download"),
+  exact("file.export.odt", "download"),
+  exact("file.export.rtf", "download"),
+  exact("file.export.html", "download"),
+  exact("file.export.markdown", "download"),
+  exact("file.export.text", "download"),
+  exact("file.export.json", "download"),
+  exact("file.print", "print"),
+  // Print ▸ Selection (`docs/153` shell.print-selection): a throwaway copy of the
+  // selection through the same print path, so the same grant.
+  exact("file.printSelection", "print"),
+  // Reading the metadata is not a grant: the document is already on screen.
+  exact("file.properties", null),
+  // Opening the compatibility findings reads a report the open already produced;
+  // it changes nothing, so it requires nothing.
+  exact("file.compatibilityReport", null),
+  // The three PDF commands (`pdf_commands.mjs`) replace the document on screen
+  // with a newly imported one, exactly as Open does, so they need what Open
+  // needs. Neither uploads anything: the PDF module runs here.
+  exact("file.pdf.recogniseText", "open"),
+  exact("file.pdf.convertToFlowing", "open"),
+  exact("file.pdf.keepExactLayout", "open"),
+  // The PDF layout switch (UX-051): each direction reopens the session's PDF,
+  // as Open does, so it needs what Open needs.
+  exact("view.pdfLayout.flowing", "open"),
+  exact("view.pdfLayout.exact", "open"),
+  // Recovering a draft requires the capability that WROTE it. A host that
+  // withheld `autosave` has no drafts of this visitor's typing, and offering to
+  // restore some would be offering work from a session the host refused to keep.
+  exact("file.recoverDrafts", "autosave"),
+  // Version history, for the same reason and the same capability: the timeline is
+  // written by the autosave path (ADR-038), so a host that withheld `autosave`
+  // has no versions of this visitor's work and opening a panel over an empty
+  // store would promise a past that was never kept. The panel it opens can
+  // RESTORE, which replaces the document — but that is gated where it belongs,
+  // on the capability that wrote the versions in the first place; a host who
+  // granted `autosave` and not `edit` gets a timeline whose restore lands in a
+  // Viewing-mode session, which is the same answer every other mutation gets.
+  exact("file.versionHistory", "autosave"),
+  // Saving a version for everyone in a room persists document bytes on the HOST, which
+  // is what `save` grants — the same grant `collab.share` asks for (`docs/169`).
+  exact("file.saveSharedVersion", "save"),
+
+  // ---- edit ---------------------------------------------------------------
+  exact("edit.undo", "mutate"),
+  exact("edit.redo", "mutate"),
+  exact("edit.cut", "mutate"),
+  // Copy is not gated, and neither is Select all or Find. Nothing in the
+  // capability set covers reading, and `capabilities.mjs` says so in as many
+  // words: a `preview` grants none of the nine and is still a usable reader.
+  exact("edit.copy", null),
+  exact("edit.paste", "mutate"),
+  exact("edit.pasteText", "mutate"),
+  // Paste as picture (`paste_picture.mjs`): the clipboard inserted as one picture.
+  exact("edit.pasteImage", "mutate"),
+  exact("edit.selectAll", null),
+  exact("edit.find", null),
+  // The same panel on its replacement field (⌘H). Opening it changes nothing; a
+  // replacement is an edit and is refused at the edit, like every other one.
+  exact("edit.replace", null),
+
+  // ---- format -------------------------------------------------------------
+  // Run direction has no tracked suggestion representation yet (RM-20).
+  exact("format.direction.rtl", "edit"),
+  exact("format.direction.ltr", "edit"),
+  exact("format.bold", "mutate"),
+  exact("format.italic", "mutate"),
+  exact("format.underline", "mutate"),
+  exact("format.strike", "mutate"),
+  exact("format.subscript", "mutate"),
+  exact("format.superscript", "mutate"),
+  exact("format.clear", "mutate"),
+  exact("format.grow", "mutate"),
+  exact("format.shrink", "mutate"),
+  exact("format.painter", "mutate"),
+  // The two split colour controls. Their `run` takes an anchor ELEMENT so the
+  // popover can be positioned, which nothing can cross a frame boundary; a host
+  // calling them gets the popover where the editor would have put it anyway.
+  exact("format.color", "mutate"),
+  exact("format.highlight", "mutate"),
+  exact("format.character.allCaps", "mutate"),
+  exact("format.character.smallCaps", "mutate"),
+  exact("format.character.doubleStrike", "mutate"),
+  exact("format.character.outline", "mutate"),
+  exact("format.character.shadow", "mutate"),
+  exact("format.character.emboss", "mutate"),
+  exact("format.character.imprint", "mutate"),
+  exact("format.character.dialog", "mutate"),
+  // Set Language writes `w:lang` on the selection, a character property (RM-42).
+  exact("format.language", "mutate"),
+  exact("format.character.advanced", "mutate"),
+  exact("format.character.border", "mutate"),
+  exact("format.character.emphasis", "mutate"),
+  exact("format.character.spacing", "mutate"),
+  exact("format.character.scale", "mutate"),
+  exact("format.character.position", "mutate"),
+  exact("format.character.kerning", "mutate"),
+  exact("format.character.ligatures", "mutate"),
+  exact("format.family", "mutate"),
+  exact("format.size", "mutate"),
+  exact("format.case.upper", "mutate"),
+  exact("format.case.lower", "mutate"),
+  exact("format.case.title", "mutate"),
+  exact("format.case.sentence", "mutate"),
+  exact("format.case.toggle", "mutate"),
+
+  // ---- paragraph ----------------------------------------------------------
+  exact("paragraph.align.start", "mutate"),
+  exact("paragraph.align.center", "mutate"),
+  exact("paragraph.align.end", "mutate"),
+  exact("paragraph.align.justify", "mutate"),
+  exact("paragraph.indent.increase", "mutate"),
+  exact("paragraph.indent.decrease", "mutate"),
+  exact("paragraph.list.settings", "mutate"),
+  exact("style.manage", "mutate"),
+  exact("paragraph.list.bullet", "mutate"),
+  exact("paragraph.list.numbered", "mutate"),
+  exact("paragraph.list.checklist", "mutate"),
+  exact("paragraph.list.continue", "mutate"),
+  exact("paragraph.list.restart", "mutate"),
+  // The heading chords' commands (Ctrl+Alt+1/2/3, Ctrl+Alt+0). Each applies a
+  // paragraph style, so each is the same `mutate` the `style.` family is.
+  exact("paragraph.heading.1", "mutate"),
+  exact("paragraph.heading.2", "mutate"),
+  exact("paragraph.heading.3", "mutate"),
+  exact("paragraph.normal", "mutate"),
+
+  // ---- insert -------------------------------------------------------------
+  exact("insert.link", "mutate"),
+  exact("insert.bookmark", "mutate"),
+  exact("insert.field", "mutate"),
+  exact("insert.dropCap", "mutate"),
+  exact("insert.image", "mutate"),
+  // Picture from URL (`picture_url.mjs`): downloaded through the host's network
+  // policy (`?remoteImages=`) and embedded.
+  exact("insert.imageFromUrl", "mutate"),
+  exact("insert.shape", "mutate"),
+  exact("insert.chart", "mutate"),
+  exact("insert.textbox", "mutate"),
+  exact("insert.symbol", "mutate"),
+  exact("insert.emoji", "mutate"),
+  // Ctrl/Cmd+Shift+Space types U+00A0, an insert like any other (RM-19).
+  exact("insert.nonBreakingSpace", "mutate"),
+  // Alt+X (`docs/153` text.unicode-code-toggle) and Insert ▸ Text from file
+  // (page.textFromFile): both change the document.
+  exact("insert.symbolByCode", "mutate"),
+  exact("insert.textFromFile", "mutate"),
+  exact("insert.table", "mutate"),
+  // Insert Table by a typed size, and Convert Text to Table (`table_tools.mjs`).
+  // Both write: one inserts a table, the other replaces paragraphs with one.
+  exact("insert.tableDialog", "mutate"),
+  exact("insert.textToTable", "mutate"),
+  // Draw Table's pencil (`table_draw_mode.mjs`): a drawn outline inserts a
+  // table, a drawn line splits cells, so the mode exists to write.
+  exact("insert.drawTable", "mutate"),
+  exact("insert.header", "mutate"),
+  exact("insert.footer", "mutate"),
+  // Per band, because linkage and removal are per band (`docs/85` §8d Q7): a
+  // section whose header is inherited while its footer is its own is a real
+  // document. `layout.*` like `layout.firstPageVariant` and the breaks: what
+  // they write is the section's `w:headerReference` / `w:footerReference`,
+  // while Insert is where people look for them (`command_taxonomy.mjs` files
+  // them in the Insert menu). Agents' twins: `link_to_previous`,
+  // `remove_header_footer`.
+  exact("layout.header.linkToPrevious", "mutate"),
+  exact("layout.footer.linkToPrevious", "mutate"),
+  exact("layout.header.remove", "mutate"),
+  exact("layout.footer.remove", "mutate"),
+  // The six page-number positions (ONLYOFFICE's Insert ▸ Page Number gallery,
+  // Word's Top / Bottom of Page). Exact rows: the set is closed. Agents' twin:
+  // `insert_page_number`.
+  exact("layout.pageNumber.topLeft", "mutate"),
+  exact("layout.pageNumber.topCenter", "mutate"),
+  exact("layout.pageNumber.topRight", "mutate"),
+  exact("layout.pageNumber.bottomLeft", "mutate"),
+  exact("layout.pageNumber.bottomCenter", "mutate"),
+  exact("layout.pageNumber.bottomRight", "mutate"),
+  // Word's "Page X of Y" preset (Bottom of Page ▸ Page X of Y).
+  exact("layout.pageNumber.pageOfTotal", "mutate"),
+  exact("insert.footnote", "mutate"),
+  exact("insert.endnote", "mutate"),
+  exact("insert.lineBreak", "mutate"),
+
+  // ---- layout / section ---------------------------------------------------
+  exact("layout.pageSetup", "mutate"),
+  exact("layout.blankPage", "mutate"),
+  exact("layout.paragraph", "mutate"),
+  exact("layout.margins", "mutate"),
+  exact("layout.orientation", "mutate"),
+  exact("layout.size", "mutate"),
+  exact("layout.columns", "mutate"),
+  // The six breaks. `mutate`, like every other page-setup command: a break
+  // changes the document. Declared EXACTLY rather than as a `layout.break.`
+  // family because the set is closed and knowable — two forced breaks and the
+  // four section start types the engine accepts — and a family is for a roster
+  // generated from the document, the font inventory or markup. An exact row also
+  // makes a host's `commands` list name each break it can drive.
+  exact("layout.break.page", "mutate"),
+  exact("layout.break.column", "mutate"),
+  exact("layout.break.section.nextPage", "mutate"),
+  exact("layout.break.section.continuous", "mutate"),
+  exact("layout.break.section.evenPage", "mutate"),
+  exact("layout.break.section.oddPage", "mutate"),
+  exact("layout.indent", "mutate"),
+  exact("layout.spacing", "mutate"),
+  // Tab stops mutate the paragraph, so they need the same grant the rest of this
+  // group needs — declared here because a capability the editor offers and the
+  // contract does not name is invisible to a host, which is the one audience
+  // this file exists for.
+  exact("layout.tabStops", "mutate"),
+  exact("layout.lineNumbers", "mutate"),
+  exact("layout.watermark", "mutate"),
+  // Page borders write the section's `w:pgBorders` (HF-193).
+  exact("layout.pageBorders", "mutate"),
+  exact("layout.firstPageVariant", "mutate"),
+  exact("layout.evenOddVariant", "mutate"),
+  // Word's Header & Footer ▸ Options, plus the position and page-numbering fields.
+  // A dialog, and still a mutation: what it writes is `w:titlePg`,
+  // `w:evenAndOddHeaders`, the header/footer distances and the section's page
+  // numbering — the same switches the two variant toggles above write, which is why
+  // they share one implementation (`header_footer_settings.mjs`).
+  exact("layout.headerFooterSettings", "mutate"),
+  exact("layout.arrange.position", "mutate"),
+  exact("layout.arrange.wrap", "mutate"),
+  // Word's Arrange group, all of it. `bringForward` was the only one declared
+  // because it was the only one that existed — it shipped permanently disabled
+  // carrying "the engine does not expose a z-order operation yet", and the rest
+  // of the group arrived with #677 when `setObjectZOrder`, `groupObjects`,
+  // `ungroupObject`, `setObjectRotation`/`setObjectFlip`, `setObjectAnchorKind`
+  // and `addTextToShape` were finally called from the editor.
+  //
+  // Every one is a MUTATION: each writes the document and each is refused by the
+  // same fail-closed gate in Viewing and Suggesting. None takes an argument —
+  // the value is in the command id, as it is for `paragraph.indent.increase`,
+  // because a host sending "bring forward" is not choosing a magnitude.
+  exact("layout.arrange.bringForward", "mutate"),
+  exact("layout.arrange.sendBackward", "mutate"),
+  exact("layout.arrange.bringToFront", "mutate"),
+  exact("layout.arrange.sendToBack", "mutate"),
+  exact("layout.arrange.group", "mutate"),
+  exact("layout.arrange.ungroup", "mutate"),
+  exact("layout.arrange.rotateRight", "mutate"),
+  exact("layout.arrange.rotateLeft", "mutate"),
+  exact("layout.arrange.flipHorizontal", "mutate"),
+  exact("layout.arrange.flipVertical", "mutate"),
+  // "In line with text" is a wrap MODE, not a separate capability — it rewrites
+  // the anchor (`wp:inline` vs `wp:anchor`) rather than setting a wrap, which is
+  // why it is its own command beside `layout.arrange.wrap` rather than a value of
+  // it.
+  exact("layout.arrange.inLine", "mutate"),
+  // Word's and Docs' Add Text on a shape. A `wps:wsp` with a `wps:txbx` IS a
+  // shape with text, so this writes a text body into the shape it names.
+  exact("layout.arrange.addText", "mutate"),
+
+  // ---- references ---------------------------------------------------------
+  exact("reference.caption", "mutate"),
+  exact("reference.crossReference", "mutate"),
+  exact("reference.tableOfContents", "mutate"),
+  // Word's Update Table: one button, a two-radio dialog, two commands. Both
+  // rewrite the contents field's own content, so both are mutations. Declared
+  // here with the Arrange group because they arrived in the same window and were
+  // missing for the same reason — the registry gained them and the contract did
+  // not, which this guard is the only thing that notices.
+  exact("reference.updateToc.pageNumbers", "mutate"),
+  exact("reference.updateToc.entire", "mutate"),
+  // Remove a table of contents (or figures) as a unit, and Insert table of
+  // figures (`docs/153` RM-25). Both rewrite the document.
+  exact("reference.removeToc", "mutate"),
+  exact("reference.tableOfFigures", "mutate"),
+  // Navigation, not mutation: it moves the caret to the heading a contents entry
+  // names and changes nothing. `null` is the same grade `view.zoom.` carries.
+  exact("reference.goToHeading", null),
+  // Footnotes and endnotes (`docs/153` page.note.*): going to a note reads and
+  // moves the caret only; the options dialog and Convert change the document.
+  exact("reference.nextFootnote", null),
+  exact("reference.previousFootnote", null),
+  exact("reference.nextEndnote", null),
+  exact("reference.previousEndnote", null),
+  exact("reference.noteSettings", "mutate"),
+  exact("reference.convertNotes", "mutate"),
+  exact("reference.updateFields", "mutate"),
+  exact("reference.updateCaptionNumbers", "mutate"),
+
+  // ---- review -------------------------------------------------------------
+  // Deciding a tracked change is EDITING, not commenting: accepting a suggestion
+  // writes it into the document outright. So these require `edit` and not
+  // `mutate`, which means a `commentor` cannot accept their own suggestions —
+  // Google Docs' Commenter cannot either, and Word's reviewer cannot. The chrome
+  // reads these rows for its own controls (`review_authority.mjs`, HF-199), so
+  // the API and the buttons give one answer.
+  exact("review.acceptAtCaret", "edit"),
+  exact("review.rejectAtCaret", "edit"),
+  exact("review.acceptNext", "edit"),
+  exact("review.rejectNext", "edit"),
+  exact("review.acceptAll", "edit"),
+  exact("review.rejectAll", "edit"),
+  // Commenting, and the three commands that are only about comments.
+  exact("review.comment", "comment"),
+  exact("review.comment.resolve", "comment"),
+  exact("review.comment.delete", "comment"),
+  // Choosing a review mode is gated by the mode itself, which is the inverse of
+  // `editingModeFor` and exactly what `allowsMode` answers: Viewing is always
+  // allowed because a reader may always read, Suggesting needs `comment`, and
+  // Editing needs `edit`. `cycle` needs nothing because it walks the modes the
+  // host allowed.
+  exact("review.mode.editing", "edit"),
+  exact("review.mode.suggesting", "comment"),
+  exact("review.mode.viewing", null),
+  exact("review.mode.cycle", null),
+  // Reading and navigating other people's comments is not a grant.
+  exact("review.next", null),
+  exact("review.previous", null),
+  exact("review.toggle", null),
+  // Display for review (`docs/153` review.display-mode-*): four VIEWS of the
+  // same document. Original shows a throwaway rejected copy read-only, so none
+  // of the four changes document state and none requires anything.
+  exact("review.displayMode.simpleMarkup", null),
+  exact("review.displayMode.allMarkup", null),
+  exact("review.displayMode.noMarkup", null),
+  exact("review.displayMode.original", null),
+  // Comparing changes NOTHING. It opens a panel, reads the document out through
+  // the export path it already has, parses a second document in a throwaway
+  // engine job and lists the differences — `casual-doc-diff`'s facade
+  // "references nothing in the live editing session" and produces a sidecar, not
+  // a merged document. So `null`, for the same reason `file.properties` is null:
+  // the document is already on screen and nothing is being written.
+  //
+  // The FILE route inside the panel is a different question and is gated where it
+  // belongs: the button that opens a file picker is disabled with its reason when
+  // the host withheld `open`, so a host that wanted review without file access
+  // still gets the version-history comparison rather than losing the capability.
+  exact("review.compare", null),
+  // Restrict Editing (ADR-052, ADR-059). `edit`, and NOT `mutate`: installing or
+  // lifting `w:documentProtection` writes the document's own policy, which is a
+  // stronger act than typing — a `commentor` whose grant is comments-only must not
+  // be able to tell the document to stop asking for comments. That is the same
+  // reasoning the six accept/reject rows carry, and the same place this API is
+  // deliberately stricter than the chrome: the chrome refuses this in Viewing mode
+  // and allows it in Suggesting, because a suggester is still an author of the
+  // file, while a host that granted only `comment` has said otherwise about this
+  // container.
+  //
+  // It is NOT conditional on a restriction being absent. A document that arrives
+  // protected must be able to reach this, or `readOnly` is a one-way door — the
+  // trap ADR-059 removed in the engine, and the one a `requires` that read the
+  // document's own state would have rebuilt here.
+  exact("review.restrictEditing", "edit"),
+  // Manage access — change what the OTHER people in a shared session may do.
+  //
+  // `null`, and not `"edit"`, which is the one surprising entry in this block.
+  // `requires` says what a host must grant for the command to be reachable, and
+  // this command touches no document at all: it changes the ROOM. A host that
+  // embeds a read-only viewer in a shared session still wants its owner able to
+  // demote somebody — withholding `edit` must not withhold that — and the
+  // capability that actually gates it is the PARTICIPANT's `manageAccess`, which
+  // is a different authority with a different source and is enforced by
+  // `session_access.mjs`'s own table and by the relay. Declaring `edit` here
+  // would be a second, wrong gate on the same command.
+  //
+  // `collab.reconnect` is the precedent and the shape is identical: a session
+  // command, `requires: null`, gated by the session's own state rather than by a
+  // container capability.
+  exact("review.manageAccess", null),
+
+  // ---- style --------------------------------------------------------------
+  // Both write to the document's style table, so both are mutations. Declared
+  // exactly, ahead of the `style.` family, because `style.Heading 1` applies a
+  // style and these two DEFINE one.
+  exact("style.updateFromSelection", "mutate"),
+  exact("style.createFromSelection", "mutate"),
+
+  // ---- table --------------------------------------------------------------
+  // Selecting is navigation; everything else in the band writes.
+  exact("table.select.row", null),
+  exact("table.select.column", null),
+  exact("table.select.table", null),
+
+  // ---- object -------------------------------------------------------------
+  // Walking the anchored objects with Tab changes nothing.
+  exact("object.selectNext", null),
+  exact("object.selectPrevious", null),
+  // The picture-text rows either replace the patch under an OCR line or
+  // restore its original ink. All four change the document (HF-418).
+  exact("imageText.fill", "mutate"),
+  exact("imageText.blur", "mutate"),
+  exact("imageText.pixelate", "mutate"),
+  exact("imageText.restore", "mutate"),
+
+  // ---- tools / view -------------------------------------------------------
+  // Proofing and chrome preferences. None of them touches the document, and all
+  // three tools rows are `noDoc` commands in the registry for the same reason.
+  exact("tools.spellCheck", null),
+  // Manage languages installs and removes proofing packs. That is application
+  // state, not document state — it changes nothing a host would need to grant a
+  // mutation for — so it requires nothing, like the proofing switches beside it.
+  // Declared because a capability the editor offers and this file does not name
+  // is invisible to a host, which is the one audience this file has.
+  exact("tools.languages", null),
+  // The personal dictionary (`docs/153` review.personal-dictionary-manage): the
+  // reader's own words, kept in their browser, never in the document.
+  exact("tools.personalDictionary", null),
+  exact("tools.grammarCheck", null),
+  exact("tools.smartQuotes", null),
+  // The AutoCorrect switches (TA-05/06): preferences, not document state.
+  exact("tools.autoFormatLists", null),
+  exact("tools.autocorrect", null),
+  // The rest of the AutoCorrect switches and their dialog (RM-19): preferences too.
+  exact("tools.autoCapitalise", null),
+  exact("tools.autoFormatDashes", null),
+  exact("tools.autoFormatHyperlink", null),
+  exact("tools.autoCorrectOptions", null),
+  // Word count reads the document and changes nothing (HF-051).
+  exact("tools.wordCount", null),
+  // The accessibility check reads the document and changes nothing (HF-064).
+  exact("tools.checkAccessibility", null),
+  // Content controls (`109` RM-34): the three that act on the control at the
+  // caret. The seven insert commands are the `controls.insert.` family below.
+  exact("controls.properties", "mutate"),
+  exact("controls.remove", "mutate"),
+  exact("controls.fill", "mutate"),
+  // Protect form is the editing restriction, and form roles are policy too, so
+  // both need the edit grant that Restrict Editing needs.
+  exact("review.protectForm", "edit"),
+  exact("forms.roles", "edit"),
+  exact("view.outline", null),
+  // `view.pages` is a panel toggle and changes no document state, so it requires
+  // nothing — the same shape as `view.outline`, which the taxonomy already puts
+  // beside it because the two are the same kind of thing.
+  exact("view.pages", null),
+  // Dark document and Multiple pages (`docs/153` shell.dark-document,
+  // shell.multiple-pages-view): how the page is shown, never what it holds.
+  exact("view.darkDocument", null),
+  exact("view.multiplePages", null),
+  exact("view.settings", null),
+  exact("view.showChanges", null),
+  // F6 / Shift+F6 move the keyboard between the window's regions. Focus is not
+  // document state, so they require nothing.
+  exact("view.region.next", null),
+  exact("view.region.previous", null),
+  // Reflow lays the body out at the reader's window width instead of on the
+  // document's paper (ADR-046). It requires NOTHING, and that is a claim worth
+  // making explicitly rather than by omission: it is a LAYOUT VIEW and not an
+  // edit — no operation, no revision bump, nothing on the export path — so a
+  // host that has granted no mutation capability at all can still offer it, and
+  // a host embedding the editor in a 400px column has a reason to. A capability
+  // the editor offers that this file does not name is invisible to a host, which
+  // is the one audience it has.
+  exact("view.reflow", null),
+  // Saying what the current view approximates requires NOTHING, for the same
+  // reason the view itself does: it reads a list the layout already computed and
+  // speaks it. It is enabled in the paged view too, where the answer is
+  // "nothing" — a host offering a read-only embed can wire it and a reader can
+  // always ask (`docs/166` R-7).
+  exact("view.reflowApproximations", null),
+  // Reconnecting a shared session requires NOTHING of the host, and that is the
+  // interesting part rather than an omission. It mutates no document — it opens a
+  // socket the reader already had — so a host that granted no mutation capability
+  // can still offer it, and a host that granted editing but whose session dropped
+  // needs it most. The grant that matters arrives on the wire in the `Welcome`
+  // and only ever NARROWS what this host already allowed, so reconnecting cannot
+  // widen a reader's reach (ADR-063).
+  exact("collab.reconnect", null),
+  // Sharing persists document bytes through the host; retained backups are
+  // downloads. Recovery synchronizes already-authorized work and authoritative
+  // arrivals, like reconnecting, rather than granting permission for a new edit.
+  exact("collab.share", "save"),
+  exact("collab.recover", null),
+  exact("collab.downloadRetained", "download"),
+  // Folding — the heading at the caret, Collapse/Expand All, and the nine level
+  // rungs (ADR-049, `109` FOLD-001). EXACT rows and not a family, by this file's
+  // own addressing rule: a family is for a roster generated from the document,
+  // while the rungs are the fixed set in `fold_view.mjs`'s `FOLD_LEVELS` —
+  // `all` plus levels one to nine, which is what `w:outlineLvl` can express.
+  //
+  // Each requires NOTHING, and that is a claim worth making explicitly rather
+  // than by omission: a fold is a VIEW, per-viewer and per-session. It issues no
+  // `Operation`, bumps no document revision, and is never written to the file —
+  // `w15:collapsed` is the document's own saved default, a separate tier. So a
+  // host that has granted no mutation capability at all may still offer it, and
+  // a host embedding a long report for READING is exactly who wants it. Same
+  // grade, for the same reason, as `view.reflow` and `view.formattingMarks.*`.
+  //
+  // What a host does NOT get from these is a guarantee that they will act: a
+  // windowed body refuses every one of them with a reason, which
+  // `foldState().withheldReason` carries and the rows carry as their
+  // `disabledReason` — a refusal, never a dead control.
+  exact("view.fold.toggle", null),
+  exact("view.fold.all", null),
+  exact("view.fold.none", null),
+  exact("view.fold.level.all", null),
+  exact("view.fold.level.l1", null),
+  exact("view.fold.level.l2", null),
+  exact("view.fold.level.l3", null),
+  exact("view.fold.level.l4", null),
+  exact("view.fold.level.l5", null),
+  exact("view.fold.level.l6", null),
+  exact("view.fold.level.l7", null),
+  exact("view.fold.level.l8", null),
+  exact("view.fold.level.l9", null),
+  // The reading measure, four steps (`docs/154` §5.1, ADR-048). EXACT rows and
+  // not a family, because this file's addressing rule is about enumerability:
+  // `format.family.*` and `style.*` are generated from the document and cannot be
+  // tabulated, while the width steps are four literals fixed in
+  // `reflow_view.mjs`'s `REFLOW_WIDTH_STEPS`. Like `view.reflow` each requires
+  // NOTHING — a width is a per-viewer reading comfort, not an edit; no operation,
+  // no revision bump, nothing on the export path — so a host that granted no
+  // mutation capability can still offer them, and a host embedding the editor in
+  // a column has a reason to reach for `full` in particular.
+  exact("view.textWidth.narrow", null),
+  exact("view.textWidth.reading", null),
+  exact("view.textWidth.fit", null),
+  exact("view.textWidth.wide", null),
+  exact("view.textWidth.full", null),
+  // Formatting marks — the ¶ button and its five individual switches
+  // (`docs/153` `shell.formatting-marks`). EXACT rows and not a family, by this
+  // file's own addressing rule: a family is for a roster generated from the
+  // document or the font inventory, while these five are the exact set of marks
+  // `casual_doc_layout::formatting_marks` can paint, fixed in
+  // `formatting_marks.mjs`.
+  //
+  // Each requires NOTHING, and that is a claim worth making explicitly rather than
+  // by omission: a mark is a VIEW. The setter issues no `Operation`, bumps no
+  // document revision, moves no page boundary and cannot reach the export path, so
+  // a host that granted no mutation capability at all may still offer it — and a
+  // reader proof-reading someone else's document is exactly who wants it. Same
+  // grade, for the same reason, as `view.reflow` and `view.textWidth.*`.
+  exact("view.formattingMarks", null),
+  exact("view.formattingMarks.tab", null),
+  exact("view.formattingMarks.space", null),
+  exact("view.formattingMarks.paragraph", null),
+  exact("view.formattingMarks.lineBreak", null),
+  exact("view.formattingMarks.pageBreak", null),
+  // The measurement-unit preference (`docs/153` `shell.measurement-units`). Also
+  // nothing: it is the PERSON's choice of how distances are shown, it changes no
+  // document byte, and it is meaningful with nothing open — which is why the
+  // engine exposes the conversion layer as free functions rather than as methods on
+  // a document handle.
+  exact("view.measurementUnits", null),
+  exact("view.compactRibbon", null),
+  exact("view.zoomIn", null),
+  exact("view.zoomOut", null),
+  exact("view.zoom", null, [
+    Object.freeze({ name: "percent", type: "number", required: false }),
+  ]),
+
+  // ---- help ---------------------------------------------------------------
+  exact("help.commands", null),
+  exact("help.shortcuts", null),
+  exact("help.about", null),
+]);
+
+/** The value families, and the state each one has members in.
+ *
+ *  Ten of them, covering 93 of the 214 ids the registry offered on the `rich`
+ *  fixture. Each prefix ends in `.` so `style.` cannot swallow
+ *  `style.createFromSelection` by accident — and even if it could, exact rows
+ *  resolve first. */
+export const COMMAND_FAMILIES = Object.freeze([
+  // Generated from the font inventory, which is not a fixed list: two reads of
+  // the same document returned different inventories when a fallback face
+  // registered between them. A table of literals here would be wrong on arrival.
+  family("format.family.", "mutate", "always"),
+  family("format.size.", "mutate", "always"),
+  family("format.underline.", "mutate", "always"),
+  family("paragraph.spacing.", "mutate", "always"),
+  // The two one-gesture space rows, generated beside the spacing presets.
+  family("paragraph.space.", "mutate", "always"),
+  family("paragraph.listFormat.", "mutate", "always"),
+  // Generated from the field-kind table, and from the document's own style list.
+  family("insert.field.", "mutate", "always"),
+  // Insert ▸ Chart's per-type rows (`insert.chart.<kind>`, HF-258), generated
+  // from the chart-type table the ribbon's picker reads.
+  family("insert.chart.", "mutate", "always"),
+  // Insert ▸ Controls' seven kinds (`controls.insert.<kind>`, `109` RM-34),
+  // generated from `CONTROL_KINDS` in `content_control_model.mjs`.
+  family("controls.insert.", "mutate", "always"),
+  // References ▸ Add text's rows (`reference.addText.none`, `.1`..`.9`):
+  // list the selected paragraphs at a contents level, or keep them out of it.
+  family("reference.addText.", "mutate", "always"),
+  family("style.", "mutate", "always"),
+  // Generated from the zoom menu's markup.
+  family("view.zoom.", null, "always"),
+  // The table band and the object menus, which exist only when the caret is in a
+  // table or an object is selected. Both write; `table.select.*` and
+  // `object.selectNext/Previous` are the exceptions and are declared exactly.
+  family("table.", "mutate", "table"),
+  family("object.", "mutate", "object"),
+  // Plugins (`docs/183` §8): `plugin.manage` (Manage add-ins) and every
+  // `plugin.<pluginId>.<commandId>` a manifest contributes. Requires nothing of the
+  // host's grant because running one only tells the plugin it was chosen; whatever
+  // the plugin then does to the document goes through the private preview or the
+  // host session's own gated `execute`, under the plugin's own grant.
+  family("plugin.", null, "always"),
+]);
+
+/** Exact ids, as a Set, for O(1) resolution. */
+const EXACT = new Map(COMMAND_CONTRACT.map((row) => [row.id, row]));
+
+/**
+ * The contract row for `id`, or `null` when the id is outside the contract.
+ *
+ * Exact first, then the longest matching family prefix — longest so that a
+ * future `table.style.` family could refine `table.` without the order of the
+ * list deciding the answer.
+ *
+ * Complexity: O(1) for an exact hit, O(families) — ten — otherwise. Called once
+ * per host command, never per keystroke.
+ *
+ * @param {string} id
+ * @returns {{id: string, requires: string|null, args: readonly object[], family?: string}|null}
+ */
+export function commandContract(id) {
+  if (typeof id !== "string" || !id) return null;
+  const hit = EXACT.get(id);
+  if (hit) return hit;
+  let best = null;
+  for (const row of COMMAND_FAMILIES) {
+    if (!id.startsWith(row.prefix)) continue;
+    if (!best || row.prefix.length > best.prefix.length) best = row;
+  }
+  if (!best) return null;
+  return Object.freeze({ id, requires: best.requires, args: Object.freeze([]), family: best.prefix });
+}
+
+/**
+ * Whether a capability set may run a command with this requirement, and the
+ * refusal if not.
+ *
+ * THE FOURTH DOOR. Phase 1 layered three enforcements — the browser's iframe
+ * sandbox, the engine's Viewing-mode choke point, and the chrome disabling a
+ * control with a reason. The API is a fourth, and it must not be the unlocked
+ * one: a host that was not granted `edit` must not be able to run an editing
+ * command THROUGH THE SDK either. So this runs BEFORE dispatch, and a refusal
+ * here means `run()` is never called at all.
+ *
+ * `mutate` resolves through `editingModeFor`, so the rule that a `commentor` may
+ * change the document as tracked suggestions lives in exactly one place.
+ *
+ * Complexity: O(1).
+ *
+ * @param {string|null} requires
+ * @param {{has: (name: string) => boolean}} capabilities
+ * @returns {boolean}
+ */
+export function grantsRequirement(requires, capabilities) {
+  if (requires === null || requires === undefined) return true;
+  if (requires === "mutate") return editingModeFor(capabilities) !== "viewing";
+  try {
+    return capabilities?.has?.(requires) === true;
+  } catch {
+    // Fail closed. An exception on the permission path is a permission decided
+    // by accident — the same rule `capabilities.mjs` states for `grants`.
+    return false;
+  }
+}
+
+/**
+ * Parses a host-declared origin allowlist.
+ *
+ * THE ORIGIN CONTRACT, stated rather than defaulted. A wildcard target origin in
+ * an editor that can be embedded anywhere is a security decision, not a default:
+ * `postMessage(documentContent, "*")` hands the bytes to whatever page happens
+ * to be the parent. ONLYOFFICE does exactly that, with a TODO where the decision
+ * should be (`reference/web-apps/apps/api/documents/api.js:1303-1306`).
+ *
+ * WHAT WE ACCEPT, AND WHY:
+ *
+ *   * The editor's OWN origin, always and implicitly. A same-origin embed — the
+ *     shape `<opendoc-editor>` produces, because `sandboxTokensFor` grants
+ *     `allow-same-origin` so the frame can reach its own WebAssembly — is the
+ *     common case, and it needs no configuration to work.
+ *   * Any origin the host names explicitly, as `?hostOrigin=https://app.example`
+ *     (comma-separated for several). Explicit, so a cross-origin host is a
+ *     deliberate act by whoever deployed the editor rather than whoever framed
+ *     it.
+ *   * Nothing else. `*` and `null` are REJECTED rather than honoured: they are
+ *     the two spellings of "anyone", and an editor that accepts them has no
+ *     origin contract at all. A rejected entry is dropped, so a typo narrows the
+ *     allowlist and never widens it.
+ *
+ * Complexity: O(entries).
+ *
+ * @param {string|null|undefined} raw the `hostOrigin` parameter, if any.
+ * @param {string} selfOrigin the editor's own origin.
+ * @returns {readonly string[]} absolute origins, deduplicated, `selfOrigin` first.
+ */
+export function parseOriginAllowlist(raw, selfOrigin) {
+  const allowed = [];
+  const add = (value) => {
+    if (typeof value !== "string") return;
+    const origin = value.trim();
+    // "null" is the origin a sandboxed or `data:` document reports, and "*" is
+    // the wildcard. Neither identifies anybody.
+    if (!origin || origin === "*" || origin === "null") return;
+    let parsed = null;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      return;
+    }
+    // An entry must BE an origin, not a URL with a path: `https://x/y` and
+    // `https://x` are the same origin, and accepting the first spelling invites
+    // a host to believe the path is part of the check.
+    if (parsed.origin !== origin) return;
+    if (!allowed.includes(parsed.origin)) allowed.push(parsed.origin);
+  };
+  add(selfOrigin);
+  for (const entry of String(raw ?? "").split(",")) add(entry);
+  return Object.freeze(allowed);
+}
+
+/**
+ * Whether a message from `origin` may be acted on.
+ *
+ * Complexity: O(allowlist).
+ *
+ * @param {string|null|undefined} origin `MessageEvent.origin`.
+ * @param {readonly string[]} allowlist
+ * @returns {boolean}
+ */
+export function originAllowed(origin, allowlist) {
+  if (typeof origin !== "string" || !origin || origin === "null" || origin === "*") return false;
+  return (allowlist ?? []).includes(origin);
+}
+
+/**
+ * Whether `message` is a well-formed request envelope for this protocol.
+ *
+ * Checked rather than trusted, and checked here rather than in the bridge, so
+ * the shape of a request is part of the schema and not part of a transport.
+ *
+ * Complexity: O(1).
+ *
+ * @param {unknown} message
+ * @returns {boolean}
+ */
+export function isRequestEnvelope(message) {
+  if (!message || typeof message !== "object") return false;
+  if (message[PROTOCOL.marker] !== PROTOCOL.version) return false;
+  if (message.kind !== "request") return false;
+  if (typeof message.rid !== "string" || !message.rid) return false;
+  return PROTOCOL.requests.includes(message.type);
+}
+
+/**
+ * Whether `message` is a well-formed envelope the HOST side should read.
+ *
+ * Complexity: O(1).
+ *
+ * @param {unknown} message
+ * @returns {boolean}
+ */
+export function isEditorEnvelope(message) {
+  if (!message || typeof message !== "object") return false;
+  if (message[PROTOCOL.marker] !== PROTOCOL.version) return false;
+  return message.kind === "result" || message.kind === "event";
+}
+
+/**
+ * The refusal a contract row produces for a capability set, or `null`.
+ *
+ * The message is an INPUT: the sentence that explains a withheld capability is
+ * localised and already exists in the chrome (`capability.notGranted`), so this
+ * module neither invents English nor routes a nineteenth translation.
+ *
+ * Complexity: O(1).
+ *
+ * @returns {{code: string, command: string, requires: string, message: string}|null}
+ */
+export function capabilityRefusal(row, capabilities, message = "") {
+  if (!row || grantsRequirement(row.requires, capabilities)) return null;
+  return Object.freeze({
+    code: "capability-withheld",
+    command: row.id,
+    requires: row.requires,
+    message,
+  });
+}
+
+/** Every requirement the contract actually uses, derived. Exported so a guard
+ *  can prove the table uses no requirement the resolver cannot answer, in both
+ *  directions — a `requires: "eddit"` typo would otherwise grant everything. */
+export function declaredRequirements() {
+  const used = new Set();
+  for (const row of COMMAND_CONTRACT) if (row.requires !== null) used.add(row.requires);
+  for (const row of COMMAND_FAMILIES) if (row.requires !== null) used.add(row.requires);
+  return Object.freeze([...used].sort());
+}
+
+// ---- Host identity (`docs/175` §3, ADR-070) ---------------------------------
+//
+// The FOURTH host input. Not a capability (it neither narrows nor widens), not a
+// region, and not a preference (a visitor must not be able to overwrite it). One
+// shape for every transport — the element's `identity` attribute and property,
+// `session.identify` over `postMessage` and in process, and ONLYOFFICE's
+// `editorConfig.user` lowered by `host_options.mjs` — and ONE validator, this one,
+// so a bound cannot be enforced on one transport and forgotten on another.
+//
+// BOUNDS ARE REFUSALS, NOT TRUNCATIONS (`docs/152` §2b): a name of 256 bytes is
+// refused naming `identity.name`, never cut to 255. Cutting would put a name on
+// every comment the person writes that is not the name the host gave.
+
+/** The `docs/175` §3 and §4.4 bounds. Bytes are UTF-8 bytes; initials are
+ *  graphemes, because "8 characters" of a Devanagari or emoji name is not 8 code
+ *  units. Exported so a guard drives each one rather than restating it. */
+export const IDENTITY_BOUNDS = Object.freeze({
+  idBytes: 128,
+  nameBytes: 255,
+  initialsGraphemes: 8,
+  avatarUrlBytes: 1024,
+  persistBytes: 255,
+});
+
+/** The fields a version-1 identity may carry. `group` is RESERVED: ONLYOFFICE's
+ *  `user.group` exists only for review and comment groups, which this contract does
+ *  not build, so a supplied one is reported `not-honoured` rather than refused. */
+const IDENTITY_FIELDS = Object.freeze(["id", "name", "initials", "color", "avatar", "persist", "group"]);
+
+const utf8Length = (text) => new TextEncoder().encode(text).length;
+
+function graphemeCount(text) {
+  if (typeof Intl !== "undefined" && typeof Intl.Segmenter === "function") {
+    let count = 0;
+    for (const _ of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)) count += 1;
+    return count;
+  }
+  return [...text].length;
+}
+
+/** A bounded, non-blank string, or null. Never trimmed or cut: the value a host
+ *  gave is the value that is used, or it is refused. */
+function boundedText(value, maxBytes) {
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const bytes = utf8Length(value);
+  return bytes >= 1 && bytes <= maxBytes ? value : null;
+}
+
+/** `https:` only, or a small `data:image/{png,jpeg,webp}` that fetches nothing.
+ *  No `http:`, no `javascript:`, no credentials in the URL (`docs/175` §4.4). */
+function avatarUrlAllowed(url) {
+  if (typeof url !== "string" || url === "" || utf8Length(url) > IDENTITY_BOUNDS.avatarUrlBytes) return false;
+  if (/^data:image\/(png|jpeg|webp)[;,]/i.test(url)) return true;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return parsed.protocol === "https:" && parsed.username === "" && parsed.password === "";
+}
+
+/**
+ * Validates a host identity (`docs/175` §3). THE one validator every transport
+ * calls.
+ *
+ * Returns `{ ok: true, identity, notes }` — `identity` frozen, holding only the
+ * version-1 fields that were given, `notes` saying what was not honoured — or
+ * `{ ok: false, refusal }`, a refusal coded `identity-invalid` whose `field`
+ * names the part that broke a bound (`identity.name`, `identity.avatar.url`, …).
+ *
+ * Accepts the object or its JSON text, because the element's attribute is text.
+ * The message is developer-facing English, like `host_options.mjs`'s notes, and
+ * never repeats the VALUE: an identity is personal data and a refusal ends up in
+ * consoles and host logs (`docs/175` §8.3).
+ *
+ * Complexity: O(size of the identity), which the bounds cap at a few KiB.
+ *
+ * @param {unknown} raw
+ * @returns {{ok: true, identity: Readonly<object>, notes: readonly object[]} |
+ *           {ok: false, refusal: Readonly<{code: string, command: string, requires: null, message: string, field: string}>}}
+ */
+export function validateHostIdentity(raw) {
+  let source = raw;
+  if (typeof raw === "string") {
+    try {
+      source = JSON.parse(raw);
+    } catch {
+      source = null;
+    }
+  }
+  const refuse = (field, message) =>
+    Object.freeze({
+      ok: false,
+      refusal: Object.freeze({ code: "identity-invalid", command: "identify", requires: null, message, field }),
+    });
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
+    return refuse("identity", "An identity is an object with at least `id` and `name`.");
+  }
+  const notes = [];
+  const identity = {};
+  const id = boundedText(source.id, IDENTITY_BOUNDS.idBytes);
+  if (id === null) return refuse("identity.id", `\`id\` must be a non-blank string of 1 to ${IDENTITY_BOUNDS.idBytes} bytes.`);
+  identity.id = id;
+  const name = boundedText(source.name, IDENTITY_BOUNDS.nameBytes);
+  if (name === null) return refuse("identity.name", `\`name\` must be a non-blank string of 1 to ${IDENTITY_BOUNDS.nameBytes} bytes.`);
+  identity.name = name;
+  if (source.initials !== undefined && source.initials !== null) {
+    const initials = source.initials;
+    if (typeof initials !== "string" || initials.trim() === "" || graphemeCount(initials) > IDENTITY_BOUNDS.initialsGraphemes) {
+      return refuse("identity.initials", `\`initials\` must be 1 to ${IDENTITY_BOUNDS.initialsGraphemes} characters.`);
+    }
+    identity.initials = initials;
+  }
+  if (source.color !== undefined && source.color !== null) {
+    if (typeof source.color !== "string" || !/^#[0-9a-f]{6}$/i.test(source.color)) {
+      return refuse("identity.color", "`color` must be \"#rrggbb\".");
+    }
+    identity.color = source.color.toLowerCase();
+  }
+  if (source.avatar !== undefined) {
+    if (source.avatar === null) identity.avatar = null;
+    else if (typeof source.avatar !== "object" || Array.isArray(source.avatar)) {
+      return refuse("identity.avatar", "`avatar` must be `{ url }` or null.");
+    } else if (!avatarUrlAllowed(source.avatar.url)) {
+      return refuse(
+        "identity.avatar.url",
+        `\`avatar.url\` must be an https: URL without credentials, or a data:image/{png,jpeg,webp} URL, of at most ${IDENTITY_BOUNDS.avatarUrlBytes} bytes.`,
+      );
+    } else identity.avatar = Object.freeze({ url: source.avatar.url });
+  }
+  if (source.persist !== undefined && source.persist !== null) {
+    if (typeof source.persist !== "object" || Array.isArray(source.persist)) {
+      return refuse("identity.persist", "`persist` must be `{ providerId, userId }`.");
+    }
+    const providerId = boundedText(source.persist.providerId, IDENTITY_BOUNDS.persistBytes);
+    if (providerId === null) return refuse("identity.persist.providerId", `\`persist.providerId\` must be 1 to ${IDENTITY_BOUNDS.persistBytes} bytes.`);
+    const userId = boundedText(source.persist.userId, IDENTITY_BOUNDS.persistBytes);
+    if (userId === null) return refuse("identity.persist.userId", `\`persist.userId\` must be 1 to ${IDENTITY_BOUNDS.persistBytes} bytes.`);
+    identity.persist = Object.freeze({ providerId, userId });
+  }
+  if (source.group !== undefined) {
+    notes.push(
+      Object.freeze({
+        option: "identity.group",
+        code: "not-honoured",
+        message: "Reserved: review and comment groups are not built, so a group changes nothing.",
+      }),
+    );
+  }
+  for (const key of Object.keys(source)) {
+    if (IDENTITY_FIELDS.includes(key)) continue;
+    notes.push(
+      Object.freeze({ option: `identity.${key}`, code: "unknown", message: "Not a field of a version-1 identity; ignored." }),
+    );
+  }
+  return Object.freeze({ ok: true, identity: Object.freeze(identity), notes: Object.freeze(notes) });
+}

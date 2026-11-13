@@ -1,0 +1,293 @@
+export const APPLE_PLATFORM = "apple";
+export const STANDARD_PLATFORM = "standard";
+
+/** Normalizes browser platform hints into the two editor keymaps.
+ *
+ * `navigator.userAgentData.platform` is preferred when present; `platform` and
+ * `userAgent` keep this deterministic in older browsers and in tests.
+ */
+export function keyboardPlatform(source = globalThis.navigator) {
+  const hint =
+    typeof source === "string"
+      ? source
+      : [source?.userAgentData?.platform, source?.platform, source?.userAgent]
+          .filter(Boolean)
+          .join(" ");
+  return /\b(?:mac|iphone|ipad|ipod)/i.test(hint)
+    ? APPLE_PLATFORM
+    : STANDARD_PLATFORM;
+}
+
+function hasUnsupportedModifier(event, platform) {
+  return platform === APPLE_PLATFORM
+    ? event.ctrlKey
+    : event.metaKey || event.altKey;
+}
+
+/** Maps a physical keyboard event to an engine navigation intent.
+ *
+ * Shift is deliberately ignored here: the caller applies it as selection
+ * extension. Unsupported platform-modifier combinations return `null` so the
+ * browser/OS keeps its native shortcut.
+ */
+export function navigationDirection(event, platform = keyboardPlatform()) {
+  const apple = platform === APPLE_PLATFORM;
+  switch (event.key) {
+    case "ArrowLeft":
+      if (hasUnsupportedModifier(event, platform)) return null;
+      if (apple && event.metaKey) return "lineStart";
+      if (apple && event.altKey) return "wordLeft";
+      if (!apple && event.ctrlKey) return "wordLeft";
+      return "left";
+    case "ArrowRight":
+      if (hasUnsupportedModifier(event, platform)) return null;
+      if (apple && event.metaKey) return "lineEnd";
+      if (apple && event.altKey) return "wordRight";
+      if (!apple && event.ctrlKey) return "wordRight";
+      return "right";
+    case "ArrowUp":
+      if (hasUnsupportedModifier(event, platform) || event.altKey) return null;
+      if ((apple && event.metaKey) || (!apple && event.ctrlKey))
+        return "paragraphUp";
+      return "up";
+    case "ArrowDown":
+      if (hasUnsupportedModifier(event, platform) || event.altKey) return null;
+      if ((apple && event.metaKey) || (!apple && event.ctrlKey))
+        return "paragraphDown";
+      return "down";
+    case "Home":
+      if (hasUnsupportedModifier(event, platform) || event.altKey) return null;
+      if ((apple && event.metaKey) || (!apple && event.ctrlKey))
+        return "docStart";
+      return "lineStart";
+    case "End":
+      if (hasUnsupportedModifier(event, platform) || event.altKey) return null;
+      if ((apple && event.metaKey) || (!apple && event.ctrlKey))
+        return "docEnd";
+      return "lineEnd";
+    case "PageUp":
+      return event.metaKey || event.ctrlKey || event.altKey ? null : "pageUp";
+    case "PageDown":
+      return event.metaKey || event.ctrlKey || event.altKey ? null : "pageDown";
+    default:
+      return null;
+  }
+}
+
+/** Returns the semantic word-deletion direction for a collapsed caret. */
+export function wordDeletionDirection(event, platform = keyboardPlatform()) {
+  if (event.key !== "Backspace" && event.key !== "Delete") return null;
+  const apple = platform === APPLE_PLATFORM;
+  const wordModifier = apple
+    ? event.altKey && !event.metaKey && !event.ctrlKey
+    : event.ctrlKey && !event.metaKey && !event.altKey;
+  if (!wordModifier) return null;
+  return event.key === "Backspace" ? "backward" : "forward";
+}
+
+/** Returns the semantic line-deletion direction for a collapsed caret.
+ *
+ * This is a macOS-only convention: ⌘Backspace deletes from the caret to the
+ * start of the line, and ⌘Delete (fn+Delete) to the end of the line. Windows
+ * and Linux have no ⌘-key equivalent, so the standard keymap always returns
+ * `null` and leaves ⌘/Ctrl combinations to the browser. Word deletion (Option
+ * on macOS, Ctrl elsewhere) is handled separately by `wordDeletionDirection`.
+ */
+export function lineDeletionDirection(event, platform = keyboardPlatform()) {
+  if (platform !== APPLE_PLATFORM) return null;
+  if (event.key !== "Backspace" && event.key !== "Delete") return null;
+  const lineModifier = event.metaKey && !event.altKey && !event.ctrlKey;
+  if (!lineModifier) return null;
+  return event.key === "Backspace" ? "backward" : "forward";
+}
+
+// Every shortcut in this editor is DECLARED in Apple glyphs — "⌘⇧P" — because
+// that is what the ribbon tooltips and the palette were first written against.
+// On Windows and Linux those glyphs name keys that are not on the keyboard, so
+// the shortcut column was telling a large share of users to press a key they do
+// not have.
+const SHORTCUT_GLYPHS = new Map([
+  ["⌘", "Ctrl"],
+  ["⌃", "Ctrl"],
+  ["⌥", "Alt"],
+  ["⇧", "Shift"],
+  ["⏎", "Enter"],
+  ["⌫", "Backspace"],
+  ["⌦", "Delete"],
+  ["⎋", "Esc"],
+  ["⇥", "Tab"],
+  // Arrow glyphs, so an Alt+Shift+Arrow chord is declarable in the one keymap
+  // rather than hand-branched in a keydown listener (docs/141 D-1 §4.1.6).
+  ["→", "Right"],
+  ["←", "Left"],
+  ["↑", "Up"],
+  ["↓", "Down"],
+]);
+
+/** The named keys a spec can end in, and the `KeyboardEvent.key` each means.
+ *
+ *  Deliberately the same glyph vocabulary `SHORTCUT_GLYPHS` renders, because
+ *  `matchesShortcut` below is the PARSE twin of `formatShortcut` above and the
+ *  two must agree about every character or a chord will be advertised in one
+ *  spelling and bound in another — which is `109` UX-006 and UX-007 in one
+ *  sentence. `⌘` is the platform's command modifier, `⌃` is a literal Control
+ *  even on Apple: the label table collapses both to "Ctrl" because that is what
+ *  a Windows keyboard calls them, but they are different physical keys.
+ */
+const NAMED_KEYS = new Map([
+  ["⏎", "Enter"],
+  ["⌫", "Backspace"],
+  ["⌦", "Delete"],
+  ["⎋", "Escape"],
+  ["⇥", "Tab"],
+  ["→", "ArrowRight"],
+  ["←", "ArrowLeft"],
+  ["↑", "ArrowUp"],
+  ["↓", "ArrowDown"],
+]);
+const MODIFIER_GLYPHS = new Set(["⌘", "⌃", "⌥", "⇧"]);
+
+/** Splits a declared shortcut into the modifiers it asks for and its key.
+ *
+ *  Exported for the guard, which walks the whole keymap and checks that every
+ *  spec parses to something a keyboard can actually produce — an unparseable
+ *  spec would otherwise be a binding that silently never fires.
+ */
+export function parseShortcut(spec) {
+  if (!spec) return null;
+  const wanted = { mod: false, control: false, alt: false, shift: false };
+  let rest = "";
+  for (const character of spec) {
+    if (MODIFIER_GLYPHS.has(character)) {
+      if (character === "⌘") wanted.mod = true;
+      else if (character === "⌃") wanted.control = true;
+      else if (character === "⌥") wanted.alt = true;
+      else wanted.shift = true;
+      continue;
+    }
+    rest += character;
+  }
+  const named = NAMED_KEYS.get(rest);
+  if (named) return { ...wanted, key: named };
+  // "Space" is spelled out rather than given a glyph: the key it means is " ",
+  // and a spec ending in a literal space renders as a label with nothing visible
+  // after the modifier — "⌃" and "Ctrl+ " were what the palette actually showed
+  // before this case existed.
+  if (rest === "Space") return { ...wanted, key: " " };
+  // A single printable character, or a named key the browser spells out (F5).
+  if ([...rest].length === 1 || /^F\d{1,2}$/.test(rest)) return { ...wanted, key: rest };
+  return null;
+}
+
+/** Whether `event` is the keystroke `spec` declares, on this platform.
+ *
+ * The point of this function is that it reads the SAME string `formatShortcut`
+ * renders, so the label in the palette and the binding in the dispatcher are one
+ * declaration rather than two tables that drift (`109` UX-006/UX-007). Before
+ * it, 25 `shortcut:` labels and four hand-written `keydown` if-chains were
+ * unrelated, and the editor both advertised chords it had never bound and bound
+ * one (⌘⇧E) it advertised nowhere.
+ *
+ * `⌘` resolves to Command on Apple and Control elsewhere, which is why one spec
+ * covers both platforms — the same economy as ONLYOFFICE putting
+ * `"command+f,ctrl+f"` in a single keymap key
+ * (`common/main/lib/util/Shortcuts.js`, used at
+ * `documenteditor/main/app/controller/LeftMenu.js:148`).
+ *
+ * Every modifier is matched EXACTLY: `⌘B` does not fire on ⌘⇧B, or Bold would
+ * steal the chord a future Bold-variant wants and the user would get an edit
+ * they did not ask for.
+ */
+export function matchesShortcut(spec, event, platform = keyboardPlatform()) {
+  const wanted = parseShortcut(spec);
+  if (!wanted || !event) return false;
+  const apple = platform === APPLE_PLATFORM;
+  if (apple) {
+    // Command and Control are different physical keys here, so ⌘B must not be
+    // satisfied by Ctrl+B and ⌃Space must not be satisfied by ⌘Space.
+    if ((event.metaKey === true) !== wanted.mod) return false;
+    if ((event.ctrlKey === true) !== wanted.control) return false;
+  } else {
+    // Everywhere else they are the SAME key: `⌘` and `⌃` both mean Control, so a
+    // spec asking for either is satisfied by Control and by nothing else. The
+    // Windows/Super key is not a chord modifier in this editor.
+    if ((event.ctrlKey === true) !== (wanted.mod || wanted.control)) return false;
+    if (event.metaKey === true) return false;
+  }
+  if ((event.altKey === true) !== wanted.alt) return false;
+  if ((event.shiftKey === true) !== wanted.shift) return false;
+  const key = event.key ?? "";
+  if (key.length === 1 && wanted.key.length === 1) {
+    if (key.toLowerCase() === wanted.key.toLowerCase()) return true;
+    // On Apple, Option REWRITES the character a key produces — ⌥1 is "¡", ⌥M is
+    // "µ" — so a ⌘⌥ chord arrives with an `event.key` that is not the key it was
+    // declared with, and matching on `key` alone made every ⌘⌥ chord (the heading
+    // styles, ⌘⌥M, ⌘⌥D) dead on a Mac. The physical key is still `event.code`.
+    // Apple ONLY, and only with ⌘ held: no character input on a Mac uses ⌘, so
+    // this cannot steal a typed character. Elsewhere Ctrl+Alt is AltGr on many
+    // layouts (German AltGr+0 is "}"), where the character must keep winning —
+    // there `key` is the only honest signal and the chord simply does not fire.
+    return apple && wanted.mod && wanted.alt && physicalKey(event.code) === wanted.key.toLowerCase();
+  }
+  return key === wanted.key;
+}
+
+/** `"Digit1"` → `"1"`, `"KeyM"` → `"m"`, anything else → `""`. The layout-free
+ *  name of a letter or digit key, for the one case `matchesShortcut` needs it. */
+function physicalKey(code) {
+  const match = /^(?:Digit(\d)|Key([A-Z]))$/.exec(code ?? "");
+  return match ? (match[1] ?? match[2].toLowerCase()) : "";
+}
+
+/** Renders a declared shortcut for the keyboard in front of the user.
+ *
+ * Apple keeps the glyphs, which is the platform convention and is what the
+ * strings already are. Everywhere else each glyph becomes its key name joined by
+ * "+", so "⌘⇧P" reads "Ctrl+Shift+P". A string with no glyphs at all is
+ * returned untouched, so a plain "F5" survives both platforms.
+ */
+export function formatShortcut(shortcut, platform = keyboardPlatform()) {
+  if (!shortcut) return "";
+  if (platform === APPLE_PLATFORM) return shortcut;
+  const parts = [];
+  let literal = "";
+  for (const character of shortcut) {
+    const name = SHORTCUT_GLYPHS.get(character);
+    if (name) {
+      if (literal) {
+        parts.push(literal);
+        literal = "";
+      }
+      parts.push(name);
+    } else {
+      literal += character;
+    }
+  }
+  if (literal) parts.push(literal);
+  return parts.join("+");
+}
+
+// Caret movement is the one part of the keymap with no command behind it — it
+// is handled straight out of `navigationDirection` — so it appears in no menu,
+// no palette and, before this table existed, in no reference either. Declared
+// here beside the function it describes, with the modifier genuinely differing
+// per platform (Apple moves by word on Option, everyone else on Control), and
+// `keyboard.test.mjs` drives each row through `navigationDirection` so a row
+// that stops being true turns red instead of quietly lying in the dialog.
+export const NAVIGATION_SHORTCUTS = [
+  { apple: "←  →", standard: "←  →", label: "Move by character", direction: ["left", "right"], event: { key: "ArrowLeft" }, second: { key: "ArrowRight" } },
+  { apple: "⌥←  ⌥→", standard: "Ctrl+←  Ctrl+→", label: "Move by word", direction: ["wordLeft", "wordRight"], event: { key: "ArrowLeft", altKey: true }, second: { key: "ArrowRight", altKey: true }, standardEvent: { key: "ArrowLeft", ctrlKey: true }, standardSecond: { key: "ArrowRight", ctrlKey: true } },
+  { apple: "↑  ↓", standard: "↑  ↓", label: "Move by line", direction: ["up", "down"], event: { key: "ArrowUp" }, second: { key: "ArrowDown" } },
+  { apple: "⌘↑  ⌘↓", standard: "Ctrl+↑  Ctrl+↓", label: "Move by paragraph", direction: ["paragraphUp", "paragraphDown"], event: { key: "ArrowUp", metaKey: true }, second: { key: "ArrowDown", metaKey: true }, standardEvent: { key: "ArrowUp", ctrlKey: true }, standardSecond: { key: "ArrowDown", ctrlKey: true } },
+  { apple: "⌘←  ⌘→", standard: "Home  End", label: "Start or end of line", direction: ["lineStart", "lineEnd"], event: { key: "ArrowLeft", metaKey: true }, second: { key: "ArrowRight", metaKey: true }, standardEvent: { key: "Home" }, standardSecond: { key: "End" } },
+  { apple: "⌘↖  ⌘↘", standard: "Ctrl+Home  Ctrl+End", label: "Start or end of document", direction: ["docStart", "docEnd"], event: { key: "Home", metaKey: true }, second: { key: "End", metaKey: true }, standardEvent: { key: "Home", ctrlKey: true }, standardSecond: { key: "End", ctrlKey: true } },
+  { apple: "⇞  ⇟", standard: "PgUp  PgDn", label: "Move by screen", direction: ["pageUp", "pageDown"], event: { key: "PageUp" }, second: { key: "PageDown" } },
+];
+
+/** The caret-movement rows as the platform in front of the user sees them. */
+export function navigationShortcuts(platform = keyboardPlatform()) {
+  return NAVIGATION_SHORTCUTS.map((row) => ({
+    keys: platform === APPLE_PLATFORM ? row.apple : row.standard,
+    label: row.label,
+  }));
+}

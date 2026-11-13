@@ -1,0 +1,672 @@
+// Rendering and driving a list of commands as rows: the compact chrome's menu
+// bar, and the ribbon chrome's File page.
+//
+// These were one hand-written block inside `main.js` that only the menu bar
+// used. Collapsing the editor's two competing navigation systems into one
+// (`109` UX-014, docs/122) gave the same roster a SECOND rendering — the File
+// tab's page — and two renderers of one command list is how the two surfaces
+// would drift into offering different things. So the row builder lives here
+// once and both callers use it, which is the same argument `INSERT_SURFACE`
+// already makes for enablement: one declaration, one implementation, several
+// faces.
+//
+// It is also the HF-085 direction: ~150 lines of behaviour that a test could
+// previously reach only by loading the whole 17.8k-line module.
+//
+// Nothing here knows what a command DOES. The caller supplies the live command
+// descriptors — `{id, label, shortcut, enabled, disabledReason, run}` — and the
+// shortcut formatter, so gating and activation stay single-sourced in `main.js`
+// with the state they read.
+//
+// ---- A band is a NAMED GROUP, not a rule -----------------------------------
+//
+// Every band renders as an element with `role="group"` carrying the band's name
+// — as `aria-label` in a dropdown, as `aria-labelledby` pointing at the visible
+// `<h3>` on the File page. The hairline between bands is drawn by CSS on the
+// group's own top edge; there is no `role="separator"` element any more, and
+// that is a deliberate choice between the two shapes ARIA offers:
+//
+//   * `role="separator"` announces "separator" and stops. It tells a screen
+//     reader that a boundary exists and nothing about what changed across it,
+//     which is the "visual line that says nothing" half-feature.
+//   * `role="group"` with a name announces "Clipboard, group" as the reader
+//     arrives, which is the same information the hairline plus the band's
+//     position gives a sighted reader. With that name present a separator
+//     between two named groups is redundant — it would announce every boundary
+//     twice — so the rule became presentation and the group became the
+//     structure.
+//
+// A group element is not focusable and is not a `.app-menu-item`, so the
+// keyboard walk, the type-ahead and the light-dismiss contract in
+// `createMenuBar` below are unchanged: they query ROWS, and rows are now one
+// level deeper in the tree rather than fewer or differently shaped.
+import { t } from "./i18n.mjs";
+
+/**
+ * Renders `sections` (named bands of command ids) into `host` as activatable
+ * rows, skipping any id the registry does not offer.
+ *
+ * A row carries its command id in `data-command` so a surface's membership is
+ * readable from the DOM — which is what lets the reachability guard compare what
+ * a surface OFFERS against the whole registry, rather than sampling labels.
+ *
+ * O(rows). `byId` is a Map so this never rescans the registry per id: the
+ * registry is rebuilt per open and a linear `find` inside this loop would make
+ * opening a menu O(commands²).
+ *
+ * @param {HTMLElement} host cleared and refilled.
+ * @param {{nameKey: string, ids: string[]}[]} sections bands, in render order.
+ * @param {Map<string, object>} byId the live registry, id → descriptor.
+ * @param {object} options
+ * @param {string} options.itemClass class for each row.
+ * @param {boolean} [options.headings] print each band's name as a visible
+ *   `<h3>` (the File page) instead of only naming the group (a dropdown).
+ * @param {(shortcut: string|undefined) => string} options.formatShortcut
+ * @param {(command: object) => void} options.onRun invoked for an enabled row.
+ * @returns {number} how many rows were rendered, so a caller can tell an empty
+ *   surface from a full one without re-reading the DOM.
+ */
+export function renderCommandRows(host, sections, byId, options) {
+  const { itemClass, headings, formatShortcut, onRun, rowFor } = options;
+  host.replaceChildren();
+  let rendered = 0;
+  sections.forEach((section, index) => {
+    const ids = section.ids;
+    // A band can carry rows that are not commands — the File page's category
+    // rows, which select a pane instead of running one. A category row takes
+    // the PLACE of the command it stands in for rather than being appended
+    // after the band, so the two File surfaces list the same things in the
+    // same order; `SKIP_ROW` is how one category row speaks for several
+    // commands (Export, for the six formats behind it).
+    const rows = [];
+    for (const id of ids) {
+      const replacement = rowFor?.(id, ids, index);
+      if (replacement === SKIP_ROW) continue;
+      if (replacement) {
+        rows.push(replacement);
+        continue;
+      }
+      const command = byId.get(id);
+      if (command) rows.push(commandRow(command, { itemClass, formatShortcut, onRun }));
+    }
+    // An empty band prints nothing at all — not a heading over blank space, and
+    // not a hairline with no rows under it. Bands go empty legitimately: the
+    // outline row is absent when the host withheld the rail.
+    if (!rows.length) return;
+
+    // A band declared `submenu` folds behind one row — but only in a DROPDOWN.
+    // The File page passes `headings`, and a full window has the room to show
+    // the group, which is why it prints a heading where the dropdown prints a
+    // name. Folding there would hide rows that already fit.
+    if (section.submenu && !headings) {
+      host.appendChild(submenuRow(section, rows, { itemClass }));
+      rendered += rows.length;
+      return;
+    }
+
+    const group = document.createElement("div");
+    group.className = `${itemClass}-group`;
+    group.setAttribute("role", "group");
+    group.dataset.group = section.nameKey;
+    const name = t(section.nameKey);
+    if (headings) {
+      const h = document.createElement("h3");
+      h.className = `${itemClass}-heading`;
+      h.id = `${itemClass}-heading-${index}`;
+      h.textContent = name;
+      group.appendChild(h);
+      group.setAttribute("aria-labelledby", h.id);
+    } else {
+      group.setAttribute("aria-label", name);
+    }
+    for (const row of rows) {
+      group.appendChild(row);
+      rendered += 1;
+    }
+    host.appendChild(group);
+  });
+  return rendered;
+}
+
+
+/** One band folded into a row that opens a flyout.
+ *
+ * The parent is a real `menuitem` carrying `aria-haspopup="menu"` and
+ * `aria-expanded`, and the flyout is a `role="menu"` — so a screen reader
+ * announces "Text, submenu, collapsed" rather than reading thirty-one rows.
+ * The rows inside are the SAME row elements the flat path builds, so a
+ * disabled row keeps its reason and a shortcut keeps its label.
+ *
+ * Opening is CSS-free state: the flyout carries `hidden`, which is what keeps
+ * its rows out of the keyboard walk (`focusable()` selects visible rows only)
+ * and out of the accessibility tree while closed.
+ *
+ * O(rows in the band).
+ */
+function submenuRow(section, rows, { itemClass }) {
+  const wrap = document.createElement("div");
+  wrap.className = `${itemClass}-submenu`;
+  wrap.setAttribute("role", "group");
+  wrap.setAttribute("aria-label", t(section.nameKey));
+  wrap.dataset.group = section.nameKey;
+
+  const parent = document.createElement("button");
+  parent.type = "button";
+  parent.className = `${itemClass}-parent`;
+  parent.setAttribute("role", "menuitem");
+  parent.setAttribute("aria-haspopup", "menu");
+  parent.setAttribute("aria-expanded", "false");
+  parent.dataset.submenu = section.nameKey;
+
+  const label = document.createElement("span");
+  label.className = `${itemClass}-label`;
+  label.textContent = t(section.nameKey);
+  parent.appendChild(label);
+
+  // The affordance is drawn, not typed: a glyph in the row's trailing slot, the
+  // same place a shortcut sits, and `aria-hidden` because `aria-haspopup`
+  // already says it to a reader.
+  const chevron = document.createElement("span");
+  chevron.className = `${itemClass}-chevron`;
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "\u203A";
+  parent.appendChild(chevron);
+
+  const flyout = document.createElement("div");
+  flyout.className = `${itemClass}-flyout`;
+  flyout.setAttribute("role", "menu");
+  flyout.setAttribute("aria-label", t(section.nameKey));
+  flyout.hidden = true;
+  for (const row of rows) flyout.appendChild(row);
+
+  wrap.append(parent, flyout);
+  return wrap;
+}
+
+/** One row. Disabled rows keep their reason in `title`, which is the only
+ *  channel a disabled button has — it takes no focus and fires no events. */
+function commandRow(command, { itemClass, formatShortcut, onRun }) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = itemClass;
+  // A row that carries a state says so to a screen reader: `checked` makes it
+  // a radio or a checkbox item with `aria-checked`, and the hint column shows
+  // the tick a sighted reader needs (View ▸ Page display ▸ PDF layout, UX-051).
+  // Rows without a `checked` field are plain items, as before.
+  const stateful = typeof command.checked === "boolean";
+  item.setAttribute("role", stateful ? (command.radio ? "menuitemradio" : "menuitemcheckbox") : "menuitem");
+  if (stateful) item.setAttribute("aria-checked", String(command.checked));
+  item.dataset.command = command.id;
+  item.disabled = command.enabled === false;
+  // Only when it is actually refused. A reason on an ENABLED row is a lie in the
+  // other direction: `file.print` is granted to a `readonly` host and was still
+  // titled "The host has not granted this", because this line ignored the state
+  // the line above it had just computed. The hint column in the palette already
+  // got this right (`c.enabled === false ? …`); the tooltip did not.
+  if (command.enabled === false && command.disabledReason) item.title = command.disabledReason;
+
+  const label = document.createElement("span");
+  label.className = `${itemClass}-label`;
+  label.textContent = command.label;
+  const hint = document.createElement("span");
+  hint.className = `${itemClass}-hint`;
+  hint.textContent = stateful && command.checked && !command.shortcut ? "✓" : formatShortcut(command.shortcut);
+  item.append(label, hint);
+  item.addEventListener("click", () => {
+    if (command.enabled === false) return;
+    onRun(command);
+  });
+  return item;
+}
+
+/**
+ * The compact chrome's menu bar: a row of buttons, one popover, and the
+ * keyboard contract a menu bar owes (arrows within and between menus, Home/End,
+ * Escape, hover-to-switch once open, light dismiss).
+ *
+ * Returned rather than wired as a side effect so `main.js` can hand over the
+ * three things only it knows — the live registry, the taxonomy and the shortcut
+ * formatter — and keep the state those read.
+ *
+ * @param {object} deps
+ * @param {HTMLElement} deps.bar the `nav` holding `.app-menu-button`s.
+ * @param {HTMLElement} deps.popover the shared popover element.
+ * @param {(name: string) => {nameKey: string, ids: string[]}[]} deps.sectionsFor
+ *   the menu's taxonomy, as named bands.
+ * @param {() => Map<string, object>} deps.registry live descriptors by id.
+ * @param {(shortcut: string|undefined) => string} deps.formatShortcut
+ * @returns {{open: Function, close: Function, isOpen: () => boolean, activeMenu: () => string|null}}
+ */
+export function createMenuBar({ bar, popover, sectionsFor, registry, formatShortcut }) {
+  const buttons = [...bar.querySelectorAll(".app-menu-button")];
+  let activeMenu = null;
+  let activeTrigger = null;
+
+  // Visible rows only. A closed flyout carries `hidden`, so its rows are out of
+  // the walk exactly as they are out of the accessibility tree — one state, not
+  // two lists that can disagree. `closest` rather than a descendant selector
+  // because a flyout may hold a row of any kind.
+  const focusable = () =>
+    [...popover.querySelectorAll(".app-menu-item:not(:disabled), .app-menu-item-parent")].filter(
+      (row) => !row.closest(".app-menu-item-flyout[hidden]"),
+    );
+
+  /** The open flyout, if one is. Only ever one: opening a sibling closes it. */
+  const openFlyout = () => popover.querySelector(".app-menu-item-flyout:not([hidden])");
+
+  /** Opens or closes one submenu. Closing returns focus to its parent row, which
+   *  is what Left and Escape owe a reader who opened it by keyboard.
+   *
+   *  `focusInto: false` is the HOVER open: the flyout shows, the keyboard stays
+   *  where it is. A pointer at rest fires `pointerover` again whenever a menu is
+   *  re-rendered under it, so a hover open that took focus stole the first row
+   *  from a reader arriving by ArrowRight: Insert opened on Insert table… and
+   *  then jumped into a submenu under the parked mouse, onto Blank page. */
+  function setSubmenu(parent, open, { focusParent = false, focusInto = true } = {}) {
+    const flyout = parent?.parentElement?.querySelector(".app-menu-item-flyout");
+    if (!flyout) return false;
+    if (open) {
+      const other = openFlyout();
+      if (other && other !== flyout) {
+        other.hidden = true;
+        other.parentElement.querySelector(".app-menu-item-parent")?.setAttribute("aria-expanded", "false");
+      }
+    }
+    flyout.hidden = !open;
+    parent.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+      placeFlyout(parent, flyout);
+      if (focusInto) flyout.querySelector(".app-menu-item:not(:disabled)")?.focus();
+    } else {
+      flyout.style.left = "";
+      flyout.style.top = "";
+      if (focusParent) parent.focus();
+    }
+    return true;
+  }
+
+  /** Puts an open flyout beside its parent row, in viewport coordinates.
+   *
+   *  The flyout is `position: fixed` because the popover scrolls and an overflow
+   *  container clips on both axes — measured, 173px of a 180px flyout was simply
+   *  not painted while `hidden` was correctly false. Fixed takes it out of that
+   *  context, and the cost is that nothing positions it any more, so this does.
+   *
+   *  Flips to the parent's left when there is no room on the right, and clamps
+   *  to the viewport bottom. On a phone the stylesheet puts it back in flow
+   *  (`position: static`, the drill shape) and this clears its inline offsets so
+   *  they cannot fight the media query.
+   *
+   *  O(1). */
+  function placeFlyout(parent, flyout) {
+    if (getComputedStyle(flyout).position !== "fixed") {
+      flyout.style.left = "";
+      flyout.style.top = "";
+      return;
+    }
+    const row = parent.getBoundingClientRect();
+    const box = flyout.getBoundingClientRect();
+    const gutter = 8;
+    const right = row.right + box.width + gutter <= window.innerWidth;
+    flyout.style.left = `${Math.max(gutter, right ? row.right : row.left - box.width)}px`;
+    const top = Math.min(row.top - 6, window.innerHeight - box.height - gutter);
+    flyout.style.top = `${Math.max(gutter, top)}px`;
+  }
+
+  /** The submenu parent whose flyout contains `row`, if any. */
+  const parentOf = (row) =>
+    row?.closest(".app-menu-item-flyout")?.parentElement?.querySelector(".app-menu-item-parent") ?? null;
+
+  function position(trigger) {
+    const rect = trigger.getBoundingClientRect();
+    const viewportWidth = document.documentElement.clientWidth;
+    const width = popover.offsetWidth;
+    popover.style.left = `${Math.max(8, Math.min(rect.left, viewportWidth - width - 8))}px`;
+    popover.style.top = `${rect.bottom + 4}px`;
+  }
+
+  function close({ restoreFocus = false } = {}) {
+    if (popover.hidden) return;
+    popover.hidden = true;
+    for (const button of buttons) button.setAttribute("aria-expanded", "false");
+    const trigger = activeTrigger;
+    activeMenu = null;
+    activeTrigger = null;
+    if (restoreFocus) trigger?.focus({ preventScroll: true });
+  }
+
+  function open(name, { focusFirst = true } = {}) {
+    const trigger = buttons.find((button) => button.dataset.menu === name);
+    if (!trigger) return;
+    for (const button of buttons) {
+      button.setAttribute("aria-expanded", String(button === trigger));
+    }
+    activeMenu = name;
+    activeTrigger = trigger;
+    renderCommandRows(popover, sectionsFor(name), registry(), {
+      itemClass: "app-menu-item",
+      formatShortcut,
+      onRun: (command) => {
+        const from = activeTrigger;
+        close();
+        from?.focus({ preventScroll: true });
+        command.run();
+      },
+    });
+    popover.setAttribute("aria-label", `${trigger.textContent.trim()} menu`);
+    popover.hidden = false;
+    position(trigger);
+    if (focusFirst) focusable()[0]?.focus({ preventScroll: true });
+  }
+
+  const adjacent = (trigger, direction) => {
+    const index = buttons.indexOf(trigger);
+    return buttons[(index + direction + buttons.length) % buttons.length];
+  };
+
+  for (const button of buttons) {
+    button.addEventListener("click", () => {
+      if (!popover.hidden && activeMenu === button.dataset.menu) close({ restoreFocus: true });
+      else open(button.dataset.menu);
+    });
+    button.addEventListener("pointerenter", () => {
+      if (!popover.hidden && activeMenu !== button.dataset.menu) {
+        open(button.dataset.menu, { focusFirst: false });
+      }
+    });
+    button.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open(button.dataset.menu);
+      } else if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+        event.preventDefault();
+        const next = adjacent(button, event.key === "ArrowRight" ? 1 : -1);
+        next.focus({ preventScroll: true });
+        next.scrollIntoView({ inline: "nearest", block: "nearest" });
+      } else if (event.key === "Escape") {
+        close({ restoreFocus: true });
+      }
+    });
+  }
+
+  // Pointer: hovering a parent opens it, hovering a sibling row closes whatever
+  // was open. That is how a menu behaves everywhere, and it costs no click.
+  popover.addEventListener("pointerover", (event) => {
+    const row = event.target.closest?.(".app-menu-item, .app-menu-item-parent");
+    if (!row || !popover.contains(row)) return;
+    if (row.classList.contains("app-menu-item-parent")) setSubmenu(row, true, { focusInto: false });
+    else if (!row.closest(".app-menu-item-flyout")) {
+      const other = openFlyout();
+      if (other) {
+        other.hidden = true;
+        other.parentElement.querySelector(".app-menu-item-parent")?.setAttribute("aria-expanded", "false");
+      }
+    }
+  });
+
+  // A parent row is a destination, not a command: click and Enter OPEN it, and
+  // never close it. Toggling here looked right and was wrong — a click is
+  // preceded by `pointerover`, which has already opened the flyout, so a toggle
+  // closed what the same gesture had just opened. Measured: aria-expanded went
+  // false -> (true) -> false within one click, at every width. Closing is
+  // Escape, Left, or moving to another row, which is how Word and Docs behave.
+  //
+  // This is also the ONLY path on a touch device, where there is no hover at
+  // all, so it has to be the one that works without one.
+  popover.addEventListener("click", (event) => {
+    const parent = event.target.closest?.(".app-menu-item-parent");
+    if (!parent || !popover.contains(parent)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setSubmenu(parent, true);
+  });
+
+  popover.addEventListener("keydown", (event) => {
+    const items = focusable();
+    const index = items.indexOf(document.activeElement);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      items[(index + direction + items.length) % items.length]?.focus();
+    } else if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      items[event.key === "Home" ? 0 : items.length - 1]?.focus();
+    } else if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+      event.preventDefault();
+      // The ARIA menubar rule, and the one every application follows: Right
+      // opens the submenu the focus is ON, Left closes the submenu the focus is
+      // IN. Only when neither applies does the arrow move to the next menu —
+      // otherwise a submenu would be unreachable by keyboard, and leaving one
+      // would jump the reader to a different menu entirely.
+      const row = document.activeElement;
+      if (event.key === "ArrowRight" && row?.classList.contains("app-menu-item-parent")) {
+        setSubmenu(row, true);
+        return;
+      }
+      if (event.key === "ArrowLeft") {
+        const parent = parentOf(row);
+        if (parent) {
+          setSubmenu(parent, false, { focusParent: true });
+          return;
+        }
+      }
+      const next = adjacent(activeTrigger, event.key === "ArrowRight" ? 1 : -1);
+      next.scrollIntoView({ inline: "nearest", block: "nearest" });
+      open(next.dataset.menu);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      // Escape inside a flyout closes the flyout, not the menu — the reader is
+      // one level in and expects to come back out, not to lose the menu.
+      const parent = parentOf(document.activeElement);
+      if (parent) {
+        setSubmenu(parent, false, { focusParent: true });
+        return;
+      }
+      close({ restoreFocus: true });
+    } else if (event.key === "Tab") {
+      close();
+    }
+  });
+
+  document.addEventListener("pointerdown", (event) => {
+    if (!popover.hidden && !popover.contains(event.target) && !bar.contains(event.target)) close();
+  });
+  window.addEventListener("resize", () => close());
+
+  return { open, close, isOpen: () => !popover.hidden, activeMenu: () => activeMenu };
+}
+
+/**
+ * Fills the File page's content pane with the document's own information.
+ *
+ * ONLYOFFICE's File page is never empty: `FileMenu.js:390` opens it on the
+ * Save-As pane when the document can be downloaded and on the Info pane
+ * otherwise, and `FileMenu.js:414` builds that Info pane from the document.
+ * We have no Save-As pane yet, so this is their fallback — and it is here
+ * rather than left blank because three quarters of an empty window reads as a
+ * broken page however good the reason for it.
+ *
+ * It takes the figures rather than computing them: the status bar already owns
+ * that arithmetic, and a second count is a second answer to "how long is this
+ * document". `info.format` is likewise the format CATALOGUE's label ("DOCX"),
+ * not the internal uniform type identifier the document carries — the caller
+ * resolves it through the same `formatInfo()` the save-format picker reads, so
+ * the page and the picker cannot name one format two different ways.
+ */
+export function renderFilePageInfo(host, info) {
+  if (!host) return;
+  host.replaceChildren();
+  if (!info) return;
+  const title = document.createElement("h2");
+  title.textContent = info.name || "Untitled document";
+  const sub = document.createElement("p");
+  sub.className = "file-detail-sub";
+  sub.textContent = info.format || "";
+  const list = document.createElement("dl");
+  for (const [label, value] of info.rows ?? []) {
+    if (value === undefined || value === null || value === "") continue;
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = String(value);
+    list.append(dt, dd);
+  }
+  host.append(title, sub, list);
+}
+
+/**
+ * A category row on the File page's rail — one that SELECTS a pane instead of
+ * running a command.
+ *
+ * ONLYOFFICE's File page is a rail plus a pane, and the rail carries both
+ * kinds: `Save`/`Print` act, while `Save as`, `Info` and `Advanced Settings`
+ * select what the pane shows (`FileMenu.js:390` even picks which one it opens
+ * on). Ours had no pane, so six export formats sat in the rail as six rows
+ * where theirs has one.
+ */
+/** Returned by `rowFor` for a command another row already speaks for: the
+ *  export formats behind the one `Export` row. It is a sentinel rather than a
+ *  boolean so "no replacement" and "already covered" cannot be confused. */
+export const SKIP_ROW = Symbol("skip row");
+
+export function categoryRow({ id, label, itemClass, selected, onSelect, covers }) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = `${itemClass} ${itemClass}-category`;
+  item.dataset.filePane = id;
+  // The commands this row stands in for. The two File surfaces render the same
+  // roster differently — a dropdown runs each command, the page opens a pane —
+  // and this is what lets a parity test prove they still offer the same things.
+  if (covers?.length) item.dataset.covers = covers.join(" ");
+  item.setAttribute("aria-pressed", String(!!selected));
+  const text = document.createElement("span");
+  text.className = `${itemClass}-label`;
+  text.textContent = label;
+  const chevron = document.createElement("span");
+  chevron.className = "ms file-page-item-chevron";
+  chevron.setAttribute("aria-hidden", "true");
+  chevron.textContent = "chevron_right";
+  item.append(text, chevron);
+  item.addEventListener("click", () => onSelect(id));
+  return item;
+}
+
+/**
+ * The Export pane: one tile per format the engine can write.
+ *
+ * ONLYOFFICE's Save As pane is a grid of format tiles (`filemenu.less`
+ * `.format-items`), and it is the pane their File page opens on whenever the
+ * document can be downloaded. This is that, with our formats.
+ */
+export function renderExportPane(host, formats, onExport) {
+  host.replaceChildren();
+  const title = document.createElement("h2");
+  title.textContent = "Export";
+  const sub = document.createElement("p");
+  sub.className = "file-detail-sub";
+  sub.textContent = "Choose a format to save a copy as.";
+  const grid = document.createElement("div");
+  grid.className = "file-format-grid";
+  for (const format of formats) {
+    const tile = document.createElement("button");
+    tile.type = "button";
+    tile.className = "file-format-tile";
+    tile.disabled = format.enabled === false;
+    if (format.reason) tile.title = format.reason;
+    // Icon plus name, which is what ONLYOFFICE's Save As tiles are. The
+    // extension used to be a second text chip beside the name, so a PDF tile
+    // read "PDF PDF" and every tile carried two labels for one format.
+    const glyph = document.createElement("span");
+    glyph.className = "ms file-format-icon";
+    glyph.setAttribute("aria-hidden", "true");
+    glyph.textContent = format.icon || "draft";
+    const name = document.createElement("span");
+    name.className = "file-format-name";
+    name.textContent = format.label;
+    tile.append(glyph, name);
+    tile.addEventListener("click", () => onExport(format));
+    grid.appendChild(tile);
+  }
+  host.append(title, sub, grid);
+}
+
+/**
+ * The New pane: one tile per starter document.
+ *
+ * ONLYOFFICE's Create New pane is a grid of document tiles with `Blank` first
+ * (`FileMenuPanels.js:1318-1350`), so this is that grid — the same tiles the
+ * Export pane uses, because they are the same thing: pick one, something
+ * happens.
+ */
+/** Tile thumbnail width in CSS pixels. 132px against a 612pt page is a 0.216
+ *  scale — close to the miniature Google Docs shows in its template gallery,
+ *  and wide enough that a title reads as a title next to body text. */
+const TEMPLATE_PREVIEW_WIDTH = 132;
+
+/**
+ * A miniature of the template's own first page: its real paragraphs at their
+ * real point sizes on a real Letter sheet, scaled down as one block. Nothing
+ * here is drawn by hand, so a template whose body changes previews differently
+ * without anybody redrawing an icon.
+ */
+export function templatePreview(thumbnail, width = TEMPLATE_PREVIEW_WIDTH) {
+  const scale = width / thumbnail.widthPt;
+  const frame = document.createElement("span");
+  frame.className = "file-template-page";
+  frame.setAttribute("aria-hidden", "true");
+  frame.style.width = `${width}px`;
+  frame.style.height = `${Math.round(thumbnail.heightPt * scale)}px`;
+  const sheet = document.createElement("span");
+  sheet.className = "file-template-sheet";
+  sheet.style.width = `${thumbnail.widthPt}px`;
+  sheet.style.height = `${thumbnail.heightPt}px`;
+  sheet.style.padding = `${thumbnail.marginPt}px`;
+  sheet.style.transform = `scale(${scale})`;
+  for (const block of thumbnail.blocks) {
+    const line = document.createElement("span");
+    line.className = "file-template-line";
+    line.style.fontSize = `${block.sizePt}px`;
+    line.style.marginTop = `${block.beforePt}px`;
+    line.style.marginBottom = `${block.afterPt}px`;
+    if (block.bold) line.style.fontWeight = "700";
+    if (block.italic) line.style.fontStyle = "italic";
+    // An empty paragraph still occupies a line on the page, and the preview is
+    // wrong if the blank lines of a letter collapse away.
+    line.textContent = block.text || "\u00a0";
+    sheet.appendChild(line);
+  }
+  frame.appendChild(sheet);
+  return frame;
+}
+
+export function renderTemplatePane(host, templates, onPick, thumbnailFor) {
+  host.replaceChildren();
+  const title = document.createElement("h2");
+  title.textContent = "New document";
+  const sub = document.createElement("p");
+  sub.className = "file-detail-sub";
+  sub.textContent = "Start from a blank page or a shape that is already laid out.";
+  const grid = document.createElement("div");
+  grid.className = "file-template-grid";
+  for (const template of templates ?? []) {
+    const tile = document.createElement("button");
+    tile.type = "button";
+    tile.className = "file-format-tile file-template-tile";
+    tile.dataset.templateId = template.id;
+    const thumbnail = thumbnailFor?.(template.id);
+    if (thumbnail) tile.appendChild(templatePreview(thumbnail));
+    const text = document.createElement("span");
+    text.className = "file-template-text";
+    const name = document.createElement("span");
+    name.className = "file-format-name";
+    name.textContent = template.label;
+    const description = document.createElement("span");
+    description.className = "file-template-description";
+    description.textContent = template.description ?? "";
+    text.append(name, description);
+    tile.appendChild(text);
+    tile.addEventListener("click", () => onPick(template.id));
+    grid.appendChild(tile);
+  }
+  host.append(title, sub, grid);
+}

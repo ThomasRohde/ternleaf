@@ -1,0 +1,24 @@
+# Text is stored with LF line endings on every platform.
+* text=auto eol=lf
+
+# The engine patch must apply byte for byte.
+engine/opendoc.patch text eol=lf -whitespace
+
+# PowerShell scripts run with either ending. Keep LF like the rest.
+*.ps1 text eol=lf
+
+# Binary files
+*.docx binary
+*.pdf binary
+*.png binary
+*.gz binary
+*.wasm binary
+*.ttf binary
+*.otf binary
+*.woff2 binary
+*.sqlite binary
+
+# The prebuilt engine is generated. Keep it out of diffs and language statistics.
+engine/prebuilt/** linguist-generated -diff
+engine/prebuilt/webapp/** -text
+engine/prebuilt/notices/** -text

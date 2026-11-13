@@ -1,0 +1,489 @@
+{
+  "ternleaf_runtime": "b6515b5151a019266ba37062990afe8ef0c956b9",
+  "opendoc_pin": "5ac261ceadbb0fa0bcbe729ce3c2e20721756949",
+  "word_version": "16.0.20704",
+  "dpi": 360,
+  "tolerance_pt": 0.25,
+  "local_font_sha256": {
+    "arial.ttf": "edfbd22a3d088fc2f5d7c79b8c9c732df6dc878a60f0a80be0f92a3c7a634404",
+    "arialbd.ttf": "4d59199834e7439c67ea4949407639961060b21b173833f566eb60ac6fd8f5af",
+    "arialbi.ttf": "d68bdf8ebfe67a72e6db02b104e8062de5e75c358ba9bb7ef5d0e5c70272a1c5",
+    "cambria.ttc": "84e70ccc1664482f4a960442c7a166c91a1b2cf98ff88c33cb73f79403f66d7b"
+  },
+  "word_resave_kept_versions": {
+    "word-first": {
+      "production_export": true,
+      "glyph_origin_error_pt": {
+        "Header Reference link": [
+          0.024,
+          0.03
+        ],
+        "Alpha REVIEWED omega": [
+          0.024,
+          0.06
+        ],
+        "Mixed": [
+          0.024,
+          0.01
+        ],
+        "chart": [
+          0.07,
+          0.01
+        ],
+        "ending": [
+          0.024,
+          0.09
+        ],
+        "Last paragraph": [
+          0.024,
+          0.09
+        ],
+        "First": [
+          0.03,
+          0.01
+        ],
+        "Second": [
+          0.03,
+          0.02
+        ],
+        "Third": [
+          0.03,
+          0.02
+        ]
+      },
+      "browser_color_box_pt": [
+        154.2,
+        116.6,
+        426.4,
+        257.0
+      ],
+      "word_color_box_pt": [
+        154.2,
+        116.6,
+        426.2,
+        257.0
+      ],
+      "box_edge_delta_pt": [
+        0.0,
+        0.0,
+        0.2,
+        0.0
+      ],
+      "bar_and_legend_edge_errors_pt": [
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.2,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.2,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "maximum_error_pt": 0.2,
+      "passes_existing_0_25_pt_threshold": true,
+      "input_text_ids": [
+        "77777777",
+        "730162B2",
+        "77777777",
+        "77777777"
+      ],
+      "edited_text_ids": [
+        "50DB89B4",
+        "730162B2",
+        "77777777",
+        "77777777"
+      ],
+      "undo_text_ids": [
+        "77777777",
+        "730162B2",
+        "77777777",
+        "77777777"
+      ],
+      "text_and_chart_no_proof_retained": true
+    },
+    "word-second": {
+      "production_export": true,
+      "glyph_origin_error_pt": {
+        "Header Reference link": [
+          0.024,
+          0.03
+        ],
+        "Alpha ACCEPTED omega": [
+          0.024,
+          0.06
+        ],
+        "Mixed": [
+          0.024,
+          0.01
+        ],
+        "chart": [
+          0.07,
+          0.01
+        ],
+        "ending": [
+          0.024,
+          0.09
+        ],
+        "Last paragraph": [
+          0.024,
+          0.09
+        ],
+        "First": [
+          0.03,
+          0.01
+        ],
+        "Second": [
+          0.03,
+          0.02
+        ],
+        "Third": [
+          0.03,
+          0.02
+        ]
+      },
+      "browser_color_box_pt": [
+        154.2,
+        116.6,
+        426.4,
+        257.0
+      ],
+      "word_color_box_pt": [
+        154.2,
+        116.6,
+        426.2,
+        257.0
+      ],
+      "box_edge_delta_pt": [
+        0.0,
+        0.0,
+        0.2,
+        0.0
+      ],
+      "bar_and_legend_edge_errors_pt": [
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.2,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.2,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "maximum_error_pt": 0.2,
+      "passes_existing_0_25_pt_threshold": true,
+      "input_text_ids": [
+        "77777777",
+        "77777777",
+        "77777777",
+        "77777777"
+      ],
+      "edited_text_ids": [
+        "3952F086",
+        "77777777",
+        "77777777",
+        "77777777"
+      ],
+      "undo_text_ids": [
+        "77777777",
+        "77777777",
+        "77777777",
+        "77777777"
+      ],
+      "text_and_chart_no_proof_retained": true
+    }
+  },
+  "word_resave_omitted_versions": {
+    "word-first": {
+      "production_export": true,
+      "glyph_origin_error_pt": {
+        "Header Reference link": [
+          0.024,
+          0.03
+        ],
+        "Alpha REVIEWED omega": [
+          0.024,
+          0.06
+        ],
+        "Mixed": [
+          0.024,
+          0.01
+        ],
+        "chart": [
+          0.07,
+          0.01
+        ],
+        "ending": [
+          0.024,
+          0.09
+        ],
+        "Last paragraph": [
+          0.024,
+          0.09
+        ],
+        "First": [
+          0.03,
+          0.01
+        ],
+        "Second": [
+          0.03,
+          0.02
+        ],
+        "Third": [
+          0.03,
+          0.02
+        ]
+      },
+      "browser_color_box_pt": [
+        154.2,
+        116.6,
+        426.4,
+        257.0
+      ],
+      "word_color_box_pt": [
+        154.2,
+        116.6,
+        426.2,
+        257.0
+      ],
+      "box_edge_delta_pt": [
+        0.0,
+        0.0,
+        0.2,
+        0.0
+      ],
+      "bar_and_legend_edge_errors_pt": [
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.2,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.2,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "maximum_error_pt": 0.2,
+      "passes_existing_0_25_pt_threshold": true,
+      "input_text_ids": [
+        "77777777",
+        "09D0A737",
+        "77777777",
+        "77777777"
+      ],
+      "edited_text_ids": [
+        "50DB89B4",
+        "09D0A737",
+        "77777777",
+        "77777777"
+      ],
+      "undo_text_ids": [
+        "77777777",
+        "09D0A737",
+        "77777777",
+        "77777777"
+      ],
+      "text_and_chart_no_proof_retained": true
+    },
+    "word-second": {
+      "production_export": true,
+      "glyph_origin_error_pt": {
+        "Header Reference link": [
+          0.024,
+          0.03
+        ],
+        "Alpha ACCEPTED omega": [
+          0.024,
+          0.06
+        ],
+        "Mixed": [
+          0.024,
+          0.01
+        ],
+        "chart": [
+          0.07,
+          0.01
+        ],
+        "ending": [
+          0.024,
+          0.09
+        ],
+        "Last paragraph": [
+          0.024,
+          0.09
+        ],
+        "First": [
+          0.03,
+          0.01
+        ],
+        "Second": [
+          0.03,
+          0.02
+        ],
+        "Third": [
+          0.03,
+          0.02
+        ]
+      },
+      "browser_color_box_pt": [
+        154.2,
+        116.6,
+        426.4,
+        257.0
+      ],
+      "word_color_box_pt": [
+        154.2,
+        116.6,
+        426.2,
+        257.0
+      ],
+      "box_edge_delta_pt": [
+        0.0,
+        0.0,
+        0.2,
+        0.0
+      ],
+      "bar_and_legend_edge_errors_pt": [
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.2,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.2,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ],
+      "maximum_error_pt": 0.2,
+      "passes_existing_0_25_pt_threshold": true,
+      "input_text_ids": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "edited_text_ids": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "undo_text_ids": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "text_and_chart_no_proof_retained": true
+    }
+  }
+}

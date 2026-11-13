@@ -1,0 +1,273 @@
+// The contextual Table band's structural controls.
+//
+// It lives in a module rather than in `main.js` for the reason `view_zoom.mjs`
+// gives: `main.js` is at its line ratchet with no slack (`module_seams`), and
+// four near-identical hand-written delegated loops are exactly what the ratchet
+// exists to refuse. Moving them here also removes the one place where the band
+// had its own opinion: its Select handler re-implemented `selectTableContext`
+// (the function the Table menu, the right-click menu and the palette all call)
+// line for line, which is two implementations of one rule — the shape `109`
+// UX-005 exists to end.
+//
+// The operations are declared in the MARKUP (`data-table-action`,
+// `data-table-distribute`, `data-table-sort`, `data-table-select`) and resolved
+// through the tables below, so a button added to the band with an operation this
+// module does not know ships DISABLED rather than live-and-inert: "never a dead
+// control" (SKILL.md §10). `table_band.test.mjs` fails if the markup and these
+// tables disagree in either direction.
+import { t } from "./i18n.mjs";
+
+/** A table's size as a reader reads it: COLUMNS × ROWS, `"4 × 3 table"`.
+ *
+ *  Word's convention — its Insert Table grid reads "4x3 Table" for four columns
+ *  and three rows, and its dialog asks for columns before rows — and the one the
+ *  Insert grid here already used. The band's hint said `rows×columns` instead, so
+ *  the same freshly inserted table was "4 × 3" in the grid and "3×4 table" on the
+ *  Table tab one click later. One formatter, read by both, is what stops the two
+ *  surfaces disagreeing again; the order lives in the catalogue sentence, so a
+ *  language that writes it differently can say so.
+ *
+ *  Complexity: O(1). */
+export function tableSizeLabel(columns, rows) {
+  return t("table.size", { columns, rows });
+}
+
+/** Insert and delete, by `data-table-action`. Each entry takes the engine and the
+ *  caret's node, so the table is data: nothing here closes over editor state. */
+export const TABLE_ROW_COLUMN_ACTIONS = Object.freeze({
+  "insert-row-above": (doc, node) => doc.insertRow(node, false),
+  "insert-row-below": (doc, node) => doc.insertRow(node, true),
+  "insert-column-left": (doc, node) => doc.insertColumn(node, false),
+  "insert-column-right": (doc, node) => doc.insertColumn(node, true),
+  "delete-row": (doc, node) => doc.deleteRow(node),
+  "delete-column": (doc, node) => doc.deleteColumn(node),
+  "delete-table": (doc, node) => doc.deleteTable(node),
+});
+
+/** What a landed structural edit SAYS, by the action that ran it: the band's
+ *  `data-table-*` value, or the menu's `merge` / `unmerge`.
+ *
+ *  A structural edit changes what a screen reader would walk over without
+ *  moving the caret, so the live region is the only place a reader learns it
+ *  happened. Only the gutter's `+` disc used to say so; the band, the Table
+ *  menu, the context menu and the palette ran the same edits in silence
+ *  (HF-346, `docs/171` §7 item 8). One table, so the surfaces cannot drift. */
+export const TABLE_EDIT_ANNOUNCEMENTS = Object.freeze({
+  "insert-row-above": "table.rowInserted",
+  "insert-row-below": "table.rowInserted",
+  "insert-column-left": "table.columnInserted",
+  "insert-column-right": "table.columnInserted",
+  "delete-row": "table.rowDeleted",
+  "delete-column": "table.columnDeleted",
+  "delete-table": "table.tableDeleted",
+  rows: "table.rowsDistributed",
+  columns: "table.columnsDistributed",
+  ascending: "table.sortedAscending",
+  descending: "table.sortedDescending",
+  merge: "table.cellsMerged",
+  unmerge: "table.cellsUnmerged",
+});
+
+/** Announces `action`'s sentence once `pending` (a `runEdit` result) lands.
+ *
+ *  AFTER the edit resolves, never beside it: `runEdit` is async and its
+ *  `applyEditResult` repaints, so a sentence written first was overwritten. A
+ *  refused edit says nothing here, because `runEdit` has already said why.
+ *
+ *  Complexity: O(1). */
+export async function announceTableEdit(pending, action, status) {
+  const landed = await pending;
+  const key = TABLE_EDIT_ANNOUNCEMENTS[action];
+  if (landed && key && status) status(t(key));
+  return landed;
+}
+
+/** Even distribution, by `data-table-distribute`. */
+export const TABLE_DISTRIBUTE_ACTIONS = Object.freeze({
+  rows: (doc, node) => doc.distributeTableRows(node),
+  columns: (doc, node) => doc.distributeTableColumns(node),
+});
+
+/** A Table-band control's precondition BEYOND "the caret is in a table", by the
+ *  selector that names it, most specific first.
+ *
+ *  `docs/141` TBL-03: band buttons shipped disabled with no stated reason while
+ *  the very same commands explain themselves in the Table menu, so a merged
+ *  table presented a grey Sort button whose tooltip still read "Sort rows
+ *  ascending" — a disabled control with no reason cannot be told from a broken
+ *  one (`SKILL.md` §10). The rules live here, next to the operations they gate,
+ *  rather than as five hand-written loops inside `updateToolbar`.
+ *
+ *  `[data-table-select="column"]` is in this table because the MENU already
+ *  gates `table.select.column` on a regular grid and the band did not — one
+ *  capability answering differently on two surfaces is the parity defect
+ *  `109` UX-005 exists to end, not a separate feature.
+ */
+// Column insert, delete, select and distribute work on a merged table (`docs/171`):
+// every one of them resolves cells through the engine's grid map. Sort alone still
+// needs a regular grid, as Word's does.
+export const TABLE_BAND_PRECONDITIONS = Object.freeze([
+  ['[data-table-distribute="rows"]', "rowHeights"],
+  ["[data-table-sort]", "regular"],
+  ["#mergeCellsBtn", "cellSelection"],
+]);
+
+/** Precondition -> the catalogue key for the sentence that explains it.
+ *
+ *  KEYS, not sentences: this module is imported by a unit test with no DOM and
+ *  no catalogue, and the band's reasons have to be the SAME sentences the Table
+ *  menu shows. `en_strings.mjs` holds each of them once. */
+export const TABLE_BAND_REASON_KEYS = Object.freeze({
+  inTable: "table.reason.caretOutsideTable",
+  regular: "table.reason.merged",
+  rowHeights: "table.reason.rowHeights",
+  cellSelection: "table.reason.mergeSelection",
+});
+
+/**
+ * Every button in the band, with whether it is available and — when it is not —
+ * the catalogue key for the reason.
+ *
+ * "The caret is in a table" is checked first and reported first: with the caret
+ * in a paragraph, "Unavailable for merged or spanned tables" would be true of
+ * nothing and would send the reader looking for a merge.
+ *
+ * @param {{querySelectorAll: Function}} root the band element.
+ * @param {{inTable?: boolean, regular?: boolean, rowHeightRule?: string,
+ *          hasCellSelection?: boolean}} context what the caret's table is,
+ *        taken from the ONE `tableInfo` the caller already holds.
+ * @returns {Array<{control: object, enabled: boolean, reasonKey: string}>}
+ *
+ * Complexity: O(controls in the band) — nineteen — and it reads no document.
+ * The caller's single `tableInfo` stays the only engine call on this path.
+ */
+export function tableBandStates(root, context) {
+  const inTable = context.inTable === true;
+  const met = {
+    inTable,
+    regular: context.regular === true,
+    rowHeights: ["exact", "atLeast"].includes(context.rowHeightRule),
+    cellSelection: context.hasCellSelection === true,
+  };
+  return [...root.querySelectorAll("button")].map((control) => {
+    const requires = TABLE_BAND_PRECONDITIONS.find(([selector]) =>
+      control.matches(selector),
+    )?.[1];
+    const unmet = !inTable ? "inTable" : requires && !met[requires] ? requires : "";
+    return {
+      control,
+      enabled: !unmet,
+      reasonKey: unmet ? TABLE_BAND_REASON_KEYS[unmet] : "",
+    };
+  });
+}
+
+/**
+ * The band's context hint: `"4 × 3 table · row 1, column 2 · merged/spanned"` —
+ * four columns, three rows, through `tableSizeLabel`.
+ *
+ * It lives here rather than in `main.js` because it is the band's own hint
+ * (`#tableContext`) and the properties panel's, and because a sentence the chrome
+ * BUILDS is testable only where it is a function of its inputs. It is also the one
+ * place a reader learns that this table is merged before a command refuses, which
+ * is why it names that state at all.
+ *
+ * Still English: the separators and the two nouns want a catalogue entry with
+ * ordered placeholders rather than four concatenated fragments, and that is a
+ * `t()` design of its own. Recorded here rather than left as an accident.
+ *
+ * @param {{rows: number, columns: number, row: number, column: number,
+ *          regular: boolean}} info one `tableInfo`, already held by the caller.
+ */
+export function tableContextLabel(info) {
+  return `${tableSizeLabel(info.columns, info.rows)} · row ${info.row + 1}, column ${info.column + 1}${info.regular ? "" : " · merged/spanned"}`;
+}
+
+/** Wires the band.
+ *
+ *  Everything the handlers need is injected, so the module never reaches for a
+ *  module-scope binding in `main.js` and can be driven from a test with a
+ *  stand-in engine.
+ *
+ *  Complexity: O(controls in the band) once at boot; each handler reads the caret
+ *  and nothing else, so activation is O(1) in document size.
+ */
+export function bindTableBand({
+  root,
+  onButton,
+  getDoc,
+  getSelection,
+  runEdit,
+  clearTableSelection,
+  selectTableContext,
+  caretTableColumn,
+  status,
+}) {
+  /** The caret's node, or null when there is nothing to act on. */
+  const caretNode = () => (getDoc() && getSelection() ? getSelection().focus.node : null);
+
+  /** Binds `control` to an operation resolved from `table`, or disables it. */
+  const bind = (control, table, key, handler) => {
+    const operation = table[key];
+    if (!operation) {
+      control.disabled = true;
+      return;
+    }
+    onButton(control, () => {
+      const node = caretNode();
+      if (!node) return;
+      handler(operation, node);
+    });
+  };
+
+  for (const control of root.querySelectorAll("[data-table-action]")) {
+    bind(control, TABLE_ROW_COLUMN_ACTIONS, control.dataset.tableAction, (operation, node) => {
+      // A structural rewrite invalidates a row/column/table selection, so the
+      // accent fill is dropped before the edit rather than left claiming a
+      // selection the new grid no longer has.
+      clearTableSelection();
+      const action = control.dataset.tableAction;
+      announceTableEdit(runEdit(() => operation(getDoc(), node), { gate: true }), action, status);
+    });
+  }
+
+  for (const control of root.querySelectorAll("[data-table-distribute]")) {
+    bind(control, TABLE_DISTRIBUTE_ACTIONS, control.dataset.tableDistribute, (operation, node) => {
+      clearTableSelection();
+      const action = control.dataset.tableDistribute;
+      announceTableEdit(runEdit(() => operation(getDoc(), node), { gate: true }), action, status);
+    });
+  }
+
+  for (const control of root.querySelectorAll("[data-table-sort]")) {
+    const direction = control.dataset.tableSort;
+    // Sort takes a direction rather than an operation, and the engine validates
+    // it, so there is no table to look it up in — but an empty attribute is still
+    // a markup bug and still ships disabled.
+    if (!direction) {
+      control.disabled = true;
+      continue;
+    }
+    onButton(control, () => {
+      const node = caretNode();
+      if (!node) return;
+      const column = caretTableColumn(node);
+      const sorted = runEdit(() => getDoc().sortTable(node, direction, column), { gate: true });
+      announceTableEdit(sorted, direction, status);
+    });
+  }
+
+  for (const control of root.querySelectorAll("[data-table-select]")) {
+    const mode = control.dataset.tableSelect;
+    if (!mode) {
+      control.disabled = true;
+      continue;
+    }
+    // The SAME function the Table menu, the right-click menu and the palette's
+    // `table.select.*` rows call. The band used to inline its own copy.
+    onButton(control, () => {
+      const node = caretNode();
+      if (node) selectTableContext(node, mode);
+    });
+  }
+}

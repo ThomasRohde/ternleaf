@@ -1,0 +1,352 @@
+// The DOM half of object snapping: the line drawn across the page to say WHY a
+// dragged object stopped where it did.
+//
+// Same split as `pointer_cursor.mjs` / `pointer_hover.mjs`. `object_snap.mjs`
+// decides where the object goes; this decides what the user sees, and takes its
+// overlay as an argument so nothing here reaches for a global page.
+//
+// Cost: a gesture creates at most TWO elements, once, and afterwards only moves
+// and hides them. A drag fires on every pointer move, so the chrome may not be
+// rebuilt per sample — `docs/107` §4.
+import { ROTATE_HANDLE_KIND, ROTATE_HANDLE_REACH } from "./object_rotate.mjs";
+import { resizeCursorForHandle } from "./pointer_cursor.mjs";
+
+/** The elements a live gesture keeps, so a pointer move moves a line instead of
+ *  building one. Create with `null` and hand the same object back each time. */
+/** @typedef {{ vertical: Element|null, horizontal: Element|null } | null} GuideElements */
+
+/**
+ * Shows exactly the guides in `guides` and hides the rest, reusing `state`'s
+ * elements.
+ *
+ * O(1) — two axes, one element each.
+ *
+ * @param {Element} overlay the page overlay to paint into
+ * @param {GuideElements} state the caller's per-gesture element cache
+ * @param {{axis: "vertical"|"horizontal", at: number, id: string}[]} guides
+ * @param {{sx: number, sy: number}} scale twips-to-CSS-pixel factors
+ * @returns {{vertical: Element|null, horizontal: Element|null}} the new state
+ */
+export function paintGuides(overlay, state, guides, scale) {
+  const next = state ?? { vertical: null, horizontal: null };
+  for (const axis of ["vertical", "horizontal"]) {
+    const guide = guides.find((candidate) => candidate.axis === axis) ?? null;
+    let el = next[axis];
+    if (!guide) {
+      if (el) el.hidden = true;
+      continue;
+    }
+    if (!el) {
+      el = document.createElement("div");
+      el.className = `object-align-guide is-${axis}`;
+      overlay.appendChild(el);
+      next[axis] = el;
+    }
+    // The id is on the element so a test can assert WHICH line the object was
+    // pulled onto — "it snapped" and "it snapped to the page centre" are
+    // different guarantees, and only the second one is the feature.
+    el.dataset.guide = guide.id;
+    if (axis === "vertical") el.style.left = `${guide.at * scale.sx}px`;
+    else el.style.top = `${guide.at * scale.sy}px`;
+    el.hidden = false;
+  }
+  return next;
+}
+
+/**
+ * Removes a gesture's guides. Called from every exit — commit, cancel and the
+ * Escape path — because a guide that outlives its drag is a line across the page
+ * explaining nothing.
+ *
+ * O(1).
+ *
+ * @param {GuideElements} state
+ */
+export function clearGuides(state) {
+  if (!state) return;
+  state.vertical?.remove();
+  state.horizontal?.remove();
+}
+
+/** The four side grips (N, E, S, W) by handle kind. */
+const SIDE_GRIPS = new Set([1, 3, 5, 7]);
+
+/** The most a side grip's target grows along its edge and into the object, in
+ *  px (`docs/109` OL-05). With the grip's own 9px that is a 25px band, and the
+ *  6px of inward reach is what a press "on the edge" a few pixels inside it
+ *  needs — ONLYOFFICE measures ~10px around each grip. */
+export const SIDE_GRIP_ALONG = 8;
+export const SIDE_GRIP_INWARD = 6;
+
+/**
+ * How far each SIDE grip's target may grow along its edge and into an upright
+ * object, sized to the object so no target reaches another grip or the body's
+ * middle (`docs/109` OL-05).
+ *
+ * The CSS growth used to be outward only, which left a side grip a 9px square:
+ * a press 5px off its centre fell to the object body and MOVED the picture.
+ * Growing it by a fixed amount instead would break the small object the demo
+ * opens with — on a 16px picture a fixed band from the South grip covers the
+ * East grip's centre and the picture's middle, so dragging East resized the
+ * wrong axis and dragging the picture resized it. So the growth is measured:
+ * along the edge it stops 10px short of the neighbouring corner's centre, and
+ * inward it stops short of half-way to the object's centre, leaving the inner
+ * half of the object to the move gesture. On a large object both reach their
+ * caps; on a 16px one both are 0, exactly the old behaviour.
+ *
+ * Only for an UPRIGHT object: the grip elements are not rotated, so on a turned
+ * object "along the edge" is not a CSS axis. A turned object keeps the outward
+ * growth alone.
+ *
+ * O(handles), a fixed 8.
+ *
+ * @returns {{along: Record<number, number>, inward: Record<number, number>} | null}
+ */
+export function sideGripReach(handles, pageOf) {
+  const at = {};
+  for (let i = 0; i + 3 < handles.length; i += 4) {
+    const [pageNumber, cx, cy, kind] = Array.prototype.slice.call(handles, i, i + 4);
+    const target = pageOf(pageNumber);
+    if (!target) continue;
+    at[kind] = [cx * target.scale.sx, cy * target.scale.sy];
+  }
+  if (![0, 1, 2, 3, 4, 5, 6, 7].every((kind) => at[kind])) return null;
+  const dist = (a, b) => Math.hypot(at[a][0] - at[b][0], at[a][1] - at[b][1]);
+  const clamp = (value, max) => Math.max(0, Math.min(max, Math.floor(value)));
+  // [side, a neighbouring corner, the opposite side]
+  const sides = [
+    [1, 0, 5],
+    [3, 2, 7],
+    [5, 4, 1],
+    [7, 6, 3],
+  ];
+  const along = {};
+  const inward = {};
+  for (const [side, corner, opposite] of sides) {
+    along[side] = clamp(dist(side, corner) - 4.5 - 10, SIDE_GRIP_ALONG);
+    inward[side] = clamp(dist(side, opposite) / 4 - 4.5, SIDE_GRIP_INWARD);
+  }
+  return { along, inward };
+}
+
+/**
+ * Paints an object's resize grips from the engine's own handle geometry.
+ *
+ * The engine emits only the handles the object's carrier can honour — an inline
+ * picture cannot move its character anchor, so it gets no north or west grips —
+ * and this draws exactly what it was given rather than eight and hiding some.
+ *
+ * O(handles), a fixed 8 at most.
+ *
+ * @param {(pageNumber: number) => {overlay: Element, scale: {sx: number, sy: number}} | null} pageOf
+ * @param {ArrayLike<number>} handles flat `[page, cx, cy, kind]` quads
+ * @param {(event: PointerEvent, pageNumber: number, kind: number) => void} onGripDown
+ */
+export function paintResizeHandles(pageOf, handles, onGripDown, options = {}) {
+  const rotation = Number(options.rotationDegrees) || 0;
+  const reach = rotation ? null : sideGripReach(handles, pageOf);
+  for (let i = 0; i + 3 < handles.length; i += 4) {
+    const [pageNumber, cx, cy, kind] = Array.prototype.slice.call(handles, i, i + 4);
+    const target = pageOf(pageNumber);
+    if (!target) continue;
+    const [px, py] = [cx * target.scale.sx, cy * target.scale.sy];
+    if (kind === ROTATE_HANDLE_KIND) {
+      if (options.onRotateDown) {
+        paintRotationHandle(target.overlay, px, py, rotation, options, (event) =>
+          options.onRotateDown(event, pageNumber));
+      }
+      continue;
+    }
+    const el = document.createElement("div");
+    el.className = "object-handle";
+    el.dataset.handle = String(kind);
+    el.style.left = `${px}px`;
+    el.style.top = `${py}px`;
+    // The CSS rules key a directional cursor off `data-handle` alone, which is
+    // right only while the object is upright: the grip drawn at the top-left of
+    // a shape turned 90 degrees drags that shape's WIDTH. An inline style wins
+    // over the rule, so a turned object gets the truthful cursor and an upright
+    // one keeps exactly the CSS the cursor contract already pins.
+    if (rotation) el.style.cursor = resizeCursorForHandle(kind, rotation);
+    if (reach && SIDE_GRIPS.has(kind)) {
+      el.style.setProperty("--grip-along", `${reach.along[kind]}px`);
+      el.style.setProperty("--grip-inward", `${reach.inward[kind]}px`);
+    }
+    el.addEventListener("pointerdown", (event) => onGripDown(event, pageNumber, kind));
+    target.overlay.appendChild(el);
+  }
+}
+
+/**
+ * Paints the rotation grip and its tether.
+ *
+ * The engine anchors the grip ON the object's (rotated) top edge and this pushes
+ * it out along the object's own axis by a fixed SCREEN distance, so the grip
+ * stays the same distance from the object at every zoom. ONLYOFFICE does the
+ * same thing from the other end — their `TRACK_DISTANCE_ROTATE` is 25 screen
+ * pixels converted into document units against the live zoom.
+ *
+ * The tether is not decoration: a lone dot floating above a shape says nothing
+ * about which object it belongs to, and at 24px away from a corner grip it reads
+ * as a stray. Word, Docs and ONLYOFFICE all draw the line.
+ *
+ * O(1) — two elements.
+ */
+function paintRotationHandle(overlay, px, py, rotation, options, onDown) {
+  const radians = (rotation - 90) * (Math.PI / 180);
+  const [gx, gy] = [
+    px + Math.cos(radians) * ROTATE_HANDLE_REACH,
+    py + Math.sin(radians) * ROTATE_HANDLE_REACH,
+  ];
+  const tether = document.createElement("div");
+  tether.className = "object-rotate-tether";
+  tether.style.left = `${px}px`;
+  tether.style.top = `${py}px`;
+  tether.style.height = `${ROTATE_HANDLE_REACH}px`;
+  tether.style.transform = `rotate(${rotation}deg)`;
+  overlay.appendChild(tether);
+
+  const el = document.createElement("div");
+  el.className = "object-handle object-rotate-handle";
+  el.dataset.handle = String(ROTATE_HANDLE_KIND);
+  el.style.left = `${gx}px`;
+  el.style.top = `${gy}px`;
+  // A grip is a control, so it says what it is and what it currently reads.
+  // `slider` rather than `button`: it has a value, a range, and arrow keys that
+  // change it, which is exactly what a screen reader should announce.
+  el.setAttribute("role", "slider");
+  el.setAttribute("tabindex", "0");
+  el.setAttribute("aria-valuemin", "0");
+  el.setAttribute("aria-valuemax", "360");
+  el.setAttribute("aria-valuenow", String(Math.round(rotation)));
+  if (options.rotateLabel) el.setAttribute("aria-label", options.rotateLabel);
+  if (options.rotateValueText) el.setAttribute("aria-valuetext", options.rotateValueText);
+  el.addEventListener("pointerdown", onDown);
+  if (options.onRotateKey) el.addEventListener("keydown", options.onRotateKey);
+  overlay.appendChild(el);
+}
+
+/**
+ * Where the object bar goes: just above the object, clamped into the scrolling
+ * page view rather than the window — an object at the top of the view must not
+ * push the bar up behind the ribbon — and off screen entirely when the object
+ * it acts on has scrolled away. A bar left parked over unrelated paragraphs
+ * with a live Delete button aimed at an object the user can no longer see is
+ * `docs/104` HF-058, and it is the reason this is arithmetic that can be
+ * checked rather than four `style.top` assignments in a repaint.
+ *
+ * Returns `null` when the bar should be hidden.
+ *
+ * O(1).
+ *
+ * @param {{left: number, top: number, bottom: number}} object viewport pixels
+ * @param {{top: number, bottom: number}} view the scrolling page view's rect
+ * @param {number} barHeight the bar's measured height
+ * @param {number} [gap] the clearance in pixels
+ * @returns {{left: number, top: number} | null}
+ */
+/** How far a resize grip's target reaches beyond the object, in pixels.
+ *
+ *  5px of centring margin plus `--grip-grow` (15px) in `style.css`. Kept beside
+ *  the arithmetic that has to clear it; if the grip's target changes there, this
+ *  moves with it and `object_guides.test.mjs` is what notices.
+ */
+export const GRIP_REACH = 20;
+
+export function objectBarPosition(object, view, barHeight, gap = 8, gripReach = GRIP_REACH) {
+  if (object.bottom <= view.top || object.top >= view.bottom) return null;
+  // The bar must clear the GRIP's target, not the object's edge. A north-facing
+  // grip is centred on the corner with a -5px margin and grows `--grip-grow`
+  // (15px) upward to make the 24px WCAG 2.5.8 target, so its hit zone starts
+  // 20px above the object — and an 8px gap put the bar squarely inside it. The
+  // top-left corner of a selected picture could then not be grabbed at all,
+  // because `elementFromPoint` answered with the bar.
+  const clearance = Math.max(gap, gripReach);
+  return {
+    left: Math.max(gap, object.left),
+    top: Math.round(
+      Math.max(
+        view.top + gap,
+        Math.min(object.top - barHeight - clearance, view.bottom - barHeight - gap),
+      ),
+    ),
+  };
+}
+
+/**
+ * Puts a transparent move pad over a selected, movable object.
+ *
+ * The pad exists for ONE reason: `touch-action`. A page sheet is a canvas the
+ * browser is free to scroll, and that decision is taken at touch-start from the
+ * `touch-action` of the element under the finger — long before any handler can
+ * call `preventDefault`. So dragging a floating image with a finger scrolled
+ * the document and the image never moved, and no amount of pointer capture in
+ * the move handler could change that, because the gesture was already gone.
+ *
+ * The resize grips do not have this problem: they are real elements carrying
+ * `touch-action: none`. The pad gives the object's BODY the same footing, and
+ * only while the object is selected and movable — so a finger still scrolls the
+ * document everywhere else, including over the same picture when it is not
+ * selected.
+ *
+ * It handles TOUCH ONLY, and is deliberately transparent to every other pointer
+ * type: a mouse press falls through to the page's own hit-test, which is what
+ * resolves a double-click into a group, a right-click into the context menu,
+ * and a click on a picture inside a text box into the right object. Taking mouse
+ * presses here broke four nested-object specs and three object-command ones,
+ * because "start moving whatever is selected" is a much blunter answer than the
+ * hit-test's. Touch has no such path to fall through to — the gesture is lost at
+ * touch-start — which is the whole reason the pad exists.
+ *
+ * O(1).
+ *
+ * @param {Element} overlay the page overlay to paint into
+ * @param {[number, number, number, number]} box the object's box in twips
+ * @param {{sx: number, sy: number}} scale
+ * @param {(event: PointerEvent) => void} onTouchDown
+ */
+export function paintMovePad(overlay, box, scale, onTouchDown) {
+  const [x, y, w, h] = box;
+  const pad = document.createElement("div");
+  pad.className = "object-move-pad";
+  pad.style.left = `${x * scale.sx}px`;
+  pad.style.top = `${y * scale.sy}px`;
+  pad.style.width = `${w * scale.sx}px`;
+  pad.style.height = `${h * scale.sy}px`;
+  pad.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "touch") onTouchDown(event);
+  });
+  overlay.appendChild(pad);
+  return pad;
+}
+
+/**
+ * Puts (or updates) the live size bubble on a drag preview.
+ *
+ * The preview was an outline and nothing else, so resizing to a specific size
+ * meant releasing, opening the properties panel to read what you got, and
+ * correcting it there. Docs shows a W×H bubble during the drag and Word
+ * live-updates its Size box; this is the same promise in the place the eye
+ * already is.
+ *
+ * It is deliberately NOT a live region: it changes on every pointer move, and a
+ * live region here would flood the screen-reader buffer. The committed size is
+ * announced once, by the caller, on release.
+ *
+ * O(1).
+ *
+ * @param {Element} preview the drag preview to label
+ * @param {string} label the already-localised size sentence
+ * @returns {Element} the readout element, to cache on the drag record
+ */
+export function paintSizeReadout(preview, label) {
+  let readout = preview.querySelector(":scope > .object-resize-readout");
+  if (!readout) {
+    readout = document.createElement("span");
+    readout.className = "object-resize-readout";
+    readout.setAttribute("aria-hidden", "true");
+    preview.appendChild(readout);
+  }
+  readout.textContent = label;
+  return readout;
+}

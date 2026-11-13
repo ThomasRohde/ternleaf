@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="96 72 880 880" fill="none" role="img" aria-labelledby="draft-title draft-desc">
+  <title id="draft-title">Ternleaf</title>
+  <desc id="draft-desc">Three rounded indigo, blue and turquoise pages fan from a shared lower-left spine. The front page has a pale cyan folded corner. No lettering; transparent background.</desc>
+  <defs>
+    <linearGradient id="draft-back" x1="172" y1="140" x2="470" y2="818" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3457DC"/>
+      <stop offset="0.52" stop-color="#203FBF"/>
+      <stop offset="1" stop-color="#142A98"/>
+    </linearGradient>
+    <linearGradient id="draft-middle" x1="424" y1="302" x2="638" y2="838" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#168AFF"/>
+      <stop offset="0.55" stop-color="#0968F4"/>
+      <stop offset="1" stop-color="#1546CE"/>
+    </linearGradient>
+    <linearGradient id="draft-front" x1="616" y1="512" x2="894" y2="918" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#18D4D0"/>
+      <stop offset="0.55" stop-color="#08B8C0"/>
+      <stop offset="1" stop-color="#0596AA"/>
+    </linearGradient>
+    <linearGradient id="draft-fold" x1="800" y1="504" x2="958" y2="676" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B0F5FF"/>
+      <stop offset="1" stop-color="#63E2EF"/>
+    </linearGradient>
+    <filter id="draft-fold-shadow" x="760" y="480" width="214" height="232" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+    <clipPath id="draft-front-clip">
+      <path d="M154 909L509 816C546 798 566 779 576 749L621 629C631 598 652 578 683 564L799 515C835 497 861 504 887 526L927 574C949 601 957 628 949 662L905 823C894 876 854 909 791 909H154Z"/>
+    </clipPath>
+  </defs>
+  <g id="draft-editions-mark">
+    <path id="draft-back-page" d="M128 896V360C128 324 142 300 172 278L420 110C452 88 482 91 502 112C519 130 524 153 522 182L511 309C509 331 504 340 484 351L453 369C410 394 397 414 387 453L318 706C314 722 304 735 289 751L128 896Z" fill="url(#draft-back)"/>
+    <path id="draft-middle-page" d="M140 902L320 733C336 717 344 697 350 670L403 470C414 432 434 411 468 390L641 281C675 260 705 267 725 291C742 312 745 337 740 368L718 479C715 500 709 513 693 522L653 546C616 568 600 590 589 626L540 764C533 782 519 794 504 803L140 902Z" fill="url(#draft-middle)"/>
+    <path id="draft-front-page" d="M154 909L509 816C546 798 566 779 576 749L621 629C631 598 652 578 683 564L799 515C835 497 861 504 887 526L927 574C949 601 957 628 949 662L905 823C894 876 854 909 791 909H154Z" fill="url(#draft-front)"/>
+    <g clip-path="url(#draft-front-clip)">
+      <path d="M795 516C822 505 839 522 839 550V579C839 618 859 639 895 639H923C944 639 951 651 949 674L965 645L884 526Z" transform="translate(-3 8)" fill="#075C84" opacity="0.3" filter="url(#draft-fold-shadow)"/>
+    </g>
+    <path id="draft-folded-corner" d="M799 515C823 506 837 521 837 546V574C837 611 856 632 892 632H919C938 632 950 643 949 662C957 628 949 601 927 574L887 526C861 504 835 497 799 515Z" fill="url(#draft-fold)"/>
+  </g>
+</svg>

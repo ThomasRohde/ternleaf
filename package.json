@@ -1,0 +1,15 @@
+{
+  "name": "ternleaf",
+  "version": "0.2.0",
+  "description": "A document canvas for GitHub Copilot: write and revise Word documents, and review each Copilot proposal before it changes the page.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "dev": "node apps/host/serve.mjs"
+  }
+}

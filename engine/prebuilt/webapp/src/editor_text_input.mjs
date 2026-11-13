@@ -1,0 +1,147 @@
+// Text entry that is not a keystroke: soft keyboards and dictation (docs/105
+// UX-001), and AutoCorrect as you type. Moved out of `main.js` unchanged
+// (docs/177); it reaches the rest of the editor only through the context `ed`.
+import { activeLocale, t } from "./i18n.mjs";
+import { createAutoCorrect } from "./autocorrect.mjs";
+import { createAutoCorrectDialog } from "./autocorrect_dialog.mjs";
+import { createLanguageSelection } from "./language_selection.mjs";
+import { readPref, writePref } from "./prefs.mjs";
+import { smartQuoteForTyped } from "./text_rules.mjs";
+import { orderedSelectionEnds } from "./caret_navigation.mjs";
+import { exitEmptyListItem } from "./list_enter.mjs";
+
+/** Installs this domain on the editor context `ed` (docs/177) and returns what the rest
+ *  of the editor calls. Runs once, from `main.js`, at the point this code used to sit. */
+export function createTextInput(ed) {
+  // ---- Soft-keyboard / dictation text entry (docs/105 UX-001) ----------------
+  // The keydown path below handles hardware keyboards, and it is still the only
+  // thing that inserts a character there. It cannot carry touch input: Android
+  // and iOS soft keyboards deliver printable characters as `keyCode 229` /
+  // `key: "Unidentified"`, and swipe-typing, dictation and autocorrect emit no
+  // usable keydown at all. `beforeinput` is the event those surfaces do fire.
+  //
+  // Deliberately narrow, so this does NOT become a second, divergent apply path —
+  // the defect class HF-007 recorded when four copy-pasted edit paths drifted:
+  //   * insertion reuses `pasteText(..., "typing")`, the exact primitive
+  //     `commitComposedText` already uses, so review mode, selection replacement
+  //     and history coalescing behave identically to an IME commit;
+  //   * DELETION is intentionally left to keydown. Backspace and Delete are real
+  //     named keys that soft keyboards do report, so there is no gap to close and
+  //     every reason not to open a second delete path.
+  // If you are here to add `deleteContentBackward`, first prove keydown misses it.
+  document.addEventListener("beforeinput", async (e) => {
+    if (!ed.editorTextInputEvent(e)) return;
+    // A composition in flight owns its own text; `compositionend` commits it.
+    if (ed.composingText) return;
+    const type = e.inputType;
+    if (type === "insertText" || type === "insertFromPaste" || type === "insertReplacementText") {
+      let data = e.data ?? "";
+      if (!data) return;
+      e.preventDefault();
+      ed.pendingFormat = null;
+      // A soft keyboard types a quote here, not through keydown, so the same
+      // smart-quote decision runs here too (HF-055: the family, not the case).
+      // Otherwise a phone gets straight quotes while a desktop gets curly ones.
+      if (type === "insertText" && (data === '"' || data === "'") && ed.selection) {
+        const [start] = orderedSelectionEnds(ed.selection, ed.doc);
+        data = smartQuoteForTyped(data, {
+          enabled: autoCorrect.enabled("smartQuotes"),
+          offset: start.offset,
+          readPrefix: () => ed.doc.copyText(start.node, 0, start.node, start.offset),
+        });
+      }
+      await ed.pasteText(data, "typing");
+      // A soft keyboard types the space that ends a word here too, so the same
+      // AutoCorrect decision runs after it (the family, not the case: a phone
+      // must not get "teh" where a desktop gets "the"). A pasted lone address
+      // is linked, as its own undo step.
+      if (type === "insertText") await autoCorrect.afterTyped([...data].at(-1));
+      else if (type === "insertFromPaste") await autoCorrect.afterPaste(data);
+      return;
+    }
+    if (type === "insertLineBreak" || type === "insertParagraph") {
+      e.preventDefault(); // An IME / on-screen-keyboard soft break IS Shift+Enter, not a new paragraph (HF-296, `docs/174` TA-01).
+      // The same empty-list-item rule the Enter key runs (UX-058, `list_enter.mjs`).
+      if (type === "insertParagraph" && ed.reviewMode !== "suggesting" && (await exitEmptyListItem(ed))) return;
+      await (type === "insertLineBreak" ? ed.insertLineBreakAtSelection() : ed.pasteText("\n", "typing"));
+    }
+  });
+
+  // The proxy must never accumulate text: the engine is the source of truth, and
+  // a textarea holding a stale value would resend it on the next composition.
+  if (ed.editorTextInputEl) {
+    ed.editorTextInputEl.addEventListener("input", () => {
+      if (ed.composingText) return; // clearing mid-composition cancels the IME
+      ed.editorTextInputEl.value = "";
+    });
+  }
+
+  document.addEventListener("compositionstart", (e) => {
+    if (!ed.editorTextInputEvent(e)) return;
+    ed.breakTypingSession();
+    ed.composingText = true;
+    ed.pendingFormat = null;
+    if (ed.selection) ed.showImePreedit(ed.selection.focus.node, ed.selection.focus.offset, e.data || "");
+  });
+  document.addEventListener("compositionupdate", (e) => {
+    if (!ed.composingText) return;
+    ed.updateImePreedit(e.data || "");
+  });
+  document.addEventListener("compositionend", async (e) => {
+    ed.hideImePreedit();
+    if (!ed.editorTextInputEvent(e)) {
+      ed.composingText = false;
+      return;
+    }
+    e.preventDefault();
+    ed.composingText = false;
+    // `preventDefault` on compositionend does not reliably stop the browser from
+    // leaving the composed text in the textarea, so clear it explicitly.
+    if (ed.editorTextInputEl) ed.editorTextInputEl.value = "";
+    await ed.commitComposedText(e.data || "");
+  });
+
+  // ---- AutoCorrect: smart quotes, automatic lists, corrections (`autocorrect.mjs`) --
+  // The quote decision is `smartQuoteForTyped` (text_rules.mjs); the list and
+  // correction rules are `input_rules.mjs`; each conversion is its own undo step.
+  const autoCorrect = createAutoCorrect({
+    readPref,
+    writePref,
+    t,
+    getDoc: () => ed.doc,
+    getSelection: () => ed.selection,
+    editing: () => ed.reviewMode === "editing",
+    runEdit: (thunk, options) => ed.runEdit(thunk, options),
+    setStatus: (text) => ed.setStatus(text),
+    reflect: () => ed.updateToolbar(),
+    defaultLanguage: () => ed.settings?.spellLanguage || "en-US",
+    // Each switch's checkboxes: the AutoCorrect dialog's (`data-autocorrect-switch`)
+    // and, for the first three, the Settings panel's. They reflect each other.
+    toggles: Object.fromEntries(
+      ["smartQuotes", "lists", "autocorrect", "capitalise", "capitaliseCells", "dashes", "hyperlinks"].map((key) => [
+        key,
+        [
+          document.getElementById({ smartQuotes: "smartQuotesToggle", lists: "autoFormatListsToggle", autocorrect: "autocorrectToggle" }[key]),
+          ...document.querySelectorAll(`[data-autocorrect-switch="${key}"]`),
+        ].filter(Boolean),
+      ]),
+    ),
+  });
+  const autoCorrectDialog = createAutoCorrectDialog(ed, autoCorrect, { locale: activeLocale });
+  const languageSelection = createLanguageSelection(ed, { locale: activeLocale });
+
+  /** Adds a word and SAYS whether it was stored. A personal dictionary that
+   *  silently failed to persist is indistinguishable from one that worked until
+   *  the next reload, and there is no management surface yet to notice with. */
+  async function addWordToDictionary(word) {
+    const stored = await ed.spellChecker.addToDictionary(word);
+    ed.setStatus(
+      stored
+        ? `Added “${word}” to your dictionary`
+        : `“${word}” is accepted for this session — your dictionary could not be saved`,
+      stored ? "" : "error",
+    );
+  }
+
+  return { addWordToDictionary, autoCorrect, autoCorrectDialog, languageSelection };
+}

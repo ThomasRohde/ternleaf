@@ -1,0 +1,825 @@
+// SPDX-License-Identifier: Apache-2.0
+// `<opendoc-editor>` — the thing a host puts on a page.
+//
+// Framework free on purpose. A custom element works in React, Vue, Svelte and
+// plain HTML with no binding layer, so `docs/126` phase 1 ships one element
+// rather than three wrappers; framework bindings are explicitly deferred.
+//
+// It mounts the editor in an iframe, which is the same shape ONLYOFFICE's
+// `DocsAPI.DocEditor` uses — `createIframe` at
+// `reference/web-apps/apps/api/documents/api.js:1278` — and for the same
+// reason: the editor is a whole application with its own stylesheet, its own
+// focus model and a WebAssembly instance, and dropping that into a host's
+// document tree makes both of them fragile. The difference is that they set no
+// `sandbox` attribute at all and we derive one from the capability set, and
+// that their host-customization path early-returns when unlicensed
+// (`reference/web-apps/apps/common/main/lib/controller/LayoutManager.js:68`,
+// `if (!_licensed || !config) return;`) where ours is ungated — the permissive
+// licence is the wedge, so gating it would surrender the only structural
+// advantage we have.
+//
+// THE MODE IS IN THE URL BEFORE THE IFRAME IS ATTACHED. That is what "resolved
+// before first paint" means here: the frame's first navigation already carries
+// the decision, so there is no window in which the editor is standalone and is
+// then told otherwise. A `mode` set afterwards therefore REMOUNTS rather than
+// mutating a live editor — a permission handed over after the document is on
+// screen was never a permission.
+//
+// No English in this file. The one user-facing string an embed needs is the
+// frame's accessible name, and it is an INPUT (`frame-title`), because the host
+// owns their page's language and their i18n already produced the rest of the
+// sentence it sits in.
+import {
+  CAPABILITIES,
+  REGIONS,
+  editingModeFor,
+  normalizePreferences,
+  parsePreferenceObject,
+  parseWithheld,
+  resolveCapabilities,
+  resolvePreferences,
+  resolveRegions,
+  sandboxTokensFor,
+} from "./capabilities.mjs";
+import { translateHostConfig, unhandledNotes } from "./host_options.mjs";
+import { validateHostIdentity } from "./host_contract.mjs";
+import { createHostClient } from "./host_client.mjs";
+
+/** The editor-URL flag saying an identity is on its way (`host_identity.mjs`'s
+ *  `AWAIT_IDENTITY_PARAM`). It carries no identity: the identity itself never
+ *  enters a URL (`docs/175` §3.2). Spelled here rather than imported because the
+ *  published package does not ship the editor's page modules. */
+const AWAIT_IDENTITY = "awaitIdentity";
+/** The avatar-consent parameter (`host_identity.mjs`'s `AVATARS_PARAM`). */
+const AVATARS = "avatars";
+/** The WebMCP opt-in parameter (`capabilities.mjs`'s `hostConfig().aiTools`) and
+ *  the one value it takes (`ai_webmcp.mjs`'s `WEBMCP_OPT_IN`), spelled here for
+ *  `AWAIT_IDENTITY`'s reason: the package does not ship the editor's page modules. */
+const AI_TOOLS = "aiTools";
+const WEBMCP = "webmcp";
+/** The network policy for Insert ▸ Picture from URL (`picture_url.mjs`'s
+ *  `REMOTE_IMAGES_PARAM`), spelled here for `AWAIT_IDENTITY`'s reason. */
+const REMOTE_IMAGES = "remoteImages";
+/** The AI provider parameter (`ai_provider_channel.mjs`'s `AI_PROVIDER_PARAM`) and
+ *  its two values, spelled here for the same reason (`docs/183` §3.8). */
+const AI_PROVIDER = "aiProvider";
+const AI_PROVIDER_VALUES = Object.freeze({ host: "host", off: "off" });
+/** The preferences a host identity supersedes: both name the person (§3.1). */
+const IDENTITY_PREFERENCES = Object.freeze(["user", "initials"]);
+
+/** `remote-images` normalised (`"direct"`, `"deny"` or a proxy template), or null
+ *  when it is none of them. The frame re-reads it through `picture_url.mjs`'s
+ *  `resolveRemoteImagePolicy`, which agrees and also fails closed. O(value). */
+function remoteImagesPolicy(value) {
+  const text = String(value ?? "").trim();
+  const lower = text.toLowerCase();
+  if (lower === "direct" || lower === "deny") return lower;
+  if (!text.includes("{url}")) return null;
+  try {
+    const parsed = new URL(text.replace("{url}", "x"));
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? text : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Where the editor lives relative to the host page, when the host does not say. */
+export const DEFAULT_EDITOR_SRC = "./editor.html";
+
+/** The element's tag. Exported so a host that must rename it still has one
+ *  spelling to change, and so a guard can assert the name rather than repeat it. */
+export const OPENDOC_EDITOR_TAG = "opendoc-editor";
+
+/** Fired once per mount, after the capability set is resolved and the frame is
+ *  attached. Deliberately NOT one of `docs/126` phase 2's editor events
+ *  (`ready`, `change`, `selection`, `save`, `export`, `error`, `refusal`) — this
+ *  is the capability contract announcing itself, not the editor reporting on a
+ *  document, and the two must not be one channel. */
+export const CAPABILITIES_EVENT = "opendoc-capabilities";
+
+/** Attributes that change what the embed IS, so a change to any of them is a
+ *  remount rather than a live update. */
+const MOUNT_ATTRIBUTES = Object.freeze([
+  "mode",
+  "can",
+  "chrome",
+  "prefs",
+  "config",
+  "editor-lang",
+  "editor-src",
+  "frame-title",
+  "identity",
+  "avatars",
+  "ai-tools",
+  "remote-images",
+  "ai-provider",
+  "plugins",
+]);
+
+/** The two NARROWING attributes, each read against the authority's own vocabulary.
+ *
+ *  `can` and `chrome` exist as attributes because the ROLE was otherwise the only
+ *  thing this element could express — which made the role the unit of the
+ *  declarative API, and the role is explicitly not the unit of anything
+ *  (`capabilities.mjs`: "a role is a name for a subset... nothing downstream
+ *  should ever branch on a role name"). A host wanting "commentor, but without
+ *  download" had to hand-write `editor-src="./editor.html?can=-download"` — to
+ *  drop out of the declarative API in order to say the thing the model is actually
+ *  built around.
+ *
+ *  The vocabularies come from `capabilities.mjs` rather than being listed here, so
+ *  there is no second statement of what a capability or a region is, and
+ *  `parseWithheld` does the reading — which is what makes these attributes
+ *  NARROW-ONLY by construction rather than by review.
+ *
+ *  A list on the attribute is UNIONED with one already in `editor-src`'s query
+ *  rather than replacing it, which is the one place this differs from `mode`.
+ *  `mode` names a starting set, so the more specific spelling has to win; a
+ *  withhold list only ever takes away, so the union of two lists is the narrower
+ *  of the three readings and cannot hand back something either spelling removed.
+ *  Replacing would have let `can="-print"` on an element whose `editor-src` said
+ *  `?can=-download` quietly restore `download` — a widening, through the one
+ *  channel the whole model rests on never widening. */
+const NARROWING = Object.freeze([
+  Object.freeze({ attribute: "can", known: CAPABILITIES, fromConfig: "can" }),
+  Object.freeze({ attribute: "chrome", known: REGIONS, fromConfig: "chrome" }),
+]);
+
+/** What the element extends.
+ *
+ *  `HTMLElement` does not exist outside a browser, and `class X extends
+ *  undefined` throws at MODULE EVALUATION — so importing this package at all
+ *  would crash any host that server-renders, which is most of them. A host
+ *  discovering that from a stack trace in their build is a worse first
+ *  experience than anything this package does right, and it cost nothing to
+ *  avoid: in a non-browser runtime the class extends an inert base, is exported
+ *  as usual, and is simply never constructed because `defineOpenDocEditor`
+ *  returns false with no `customElements` to register against. */
+const ElementBase = typeof HTMLElement === "function" ? HTMLElement : class {};
+
+const SHADOW_STYLE = `
+  :host { display: block; position: relative; min-height: 240px; }
+  :host([hidden]) { display: none; }
+  iframe { display: block; width: 100%; height: 100%; min-height: inherit; border: 0; }
+`;
+
+/**
+ * An embedded opendoc editor.
+ *
+ * ```html
+ * <opendoc-editor mode="readonly" frame-title="…"></opendoc-editor>
+ * ```
+ *
+ * Attributes (all optional):
+ *
+ *  * `mode` — one of the five roles (`preview`, `readonly`, `commentor`,
+ *    `edit`, `owner`) or a legacy preset name. Absent means the framed default,
+ *    which an element-mounted editor always is, so absent is never
+ *    `standalone`. NOT called `role`: `role` is a global ARIA attribute, and
+ *    `role="readonly"` would publish an invalid ARIA role to every assistive
+ *    technology on the page. `mode` is also the spelling the URL parameter and
+ *    `resolveCapabilities({ mode })` already use, so there is one vocabulary
+ *    rather than two.
+ *  * `can` — capabilities to WITHHOLD from the role: `"-download"`, or
+ *    `"-print,-download"`. Narrows, never widens, whatever the role. This is the
+ *    per-capability half of the policy the model rests on, and it is an attribute
+ *    so that a host expressing "commentor, but without download" does not have to
+ *    leave the declarative API and hand-write a query string.
+ *  * `chrome` — chrome regions to withhold, by the same rule: `"-brand,-rail"`.
+ *  * `prefs` — the container's OPENING POSITIONS, as a JSON object:
+ *    `'{"user":"Ada Lovelace","spellcheck":false}'`. Not permissions and not
+ *    surfaces — defaults the visitor may still change, which is why they are
+ *    neither narrowed nor widened but simply set. An unknown name or an
+ *    unreadable value is dropped and reported.
+ *  * `config` — an ONLYOFFICE-shaped host configuration
+ *    (`permissions` / `editorConfig` / `editorConfig.customization`), accepted
+ *    verbatim and lowered onto `mode`, `can`, `chrome`, `prefs` and the editor's
+ *    language. This is the migration surface: a host hands over the object they
+ *    already wrote for the editor they already pay for. Everything that cannot be
+ *    honoured is REPORTED on the capabilities event and warned about once — never
+ *    silently dropped, which is what their `_applyCustomization` does to every
+ *    unlicensed integrator.
+ *  * `editor-lang` — the editor's language (their `editorConfig.lang`). Not
+ *    called `lang`: that is a global HTML attribute and setting it here would
+ *    relabel the host's own element for every assistive technology on the page.
+ *  * `editor-src` — where `editor.html` is. May carry the host's own query
+ *    (`?blank=1`, `?fixture=rich`); `mode` is merged into it, never appended
+ *    twice, and `can`/`chrome` are unioned with any the query already carries.
+ *  * `frame-title` — the frame's accessible name, in the host's language.
+ *  * `identity` — WHO this person is, as JSON: `'{"id":"u_8f2c","name":"Ada"}'`
+ *    (`docs/175` §3). The fourth host input: not a preference, so the visitor
+ *    cannot change it, and when it is given it is the only identity — `prefs.user`
+ *    and `prefs.initials` are dropped and reported `superseded-by-identity`. It
+ *    NEVER enters the frame's URL (history, `Referer` and access logs would all
+ *    keep it); the element hands it over in a one-shot `identify` message once the
+ *    frame has loaded, and the URL says only that one is coming. Also settable as
+ *    the `identity` property, for a host that would rather not put a name in the
+ *    DOM; the property wins over the attribute, and both over `config`'s
+ *    `editorConfig.user`. A change remounts.
+ *  * `avatars` — `"fetch"` is the host's consent to load participants' avatar
+ *    URLs (`docs/175` §8.1). Absent, nothing is fetched and chips show initials.
+ *  * `remote-images` — the host's network policy for Insert ▸ Picture from URL
+ *    (`picture_url.mjs`). `"direct"` (the default when absent): the frame downloads
+ *    the address the person typed itself, with no credentials and no referrer.
+ *    `"deny"`: the command refuses, saying the host does not allow it. A URL
+ *    containing `{url}` (`"https://host.example/fetch?u={url}"`): every download
+ *    goes to the HOST's proxy with the address percent-encoded in its place, sent
+ *    `credentials: "same-origin"`, so the host applies its own allow-list, scan
+ *    and size cap. However fetched, the picture is EMBEDDED in the document, never
+ *    linked. Any other value is dropped and reported, and the frame then refuses
+ *    (fails closed). Becomes `?remoteImages=`.
+ *  * `ai-tools` — `"webmcp"` offers the in-page assistant's tools (`editor.ai`) to a
+ *    browser agent through WebMCP (`docs/178` §9). Off when absent. The tools are
+ *    registered in the FRAME's document, so this page cannot call them; they are
+ *    filtered by the same grant as `editor.ai`, and every edit is a private
+ *    proposal the person accepts or discards. Becomes `?aiTools=webmcp`.
+ *  * `ai-provider` — `"off"` withdraws every AI feature in the frame, bring-your-own
+ *    key included (`docs/183` §3.8). To serve the host's own model, set the
+ *    `aiProvider` PROPERTY to `async (request, {signal, onChunk, purpose}) =>
+ *    response`, with OpenAI Chat Completions JSON both ways; the frame is told
+ *    `?aiProvider=host` and its requests arrive as `ai-provider` events, which this
+ *    element answers from the property. The key stays on the host's side.
+ *  * `plugins` — the URL of the host's plugin catalogue (`docs/183` §9): OpenDoc
+ *    manifests with the permissions the host grants each, run in sandboxed frames.
+ *    `"none"` removes every plugin, first-party ones included. Absent, a framed
+ *    editor runs none. Becomes `?plugins=`.
+ *
+ * Properties: `mode`, `identity`, `capabilities`, `regions`, `editingMode`,
+ * `sandbox`, `frame`, `can(name)`. `can` and `chrome` have no reflecting
+ * property on purpose — see the note in the class body.
+ *
+ * Complexity: O(1) per mount. Nothing here walks a document.
+ */
+export class OpenDocEditorElement extends ElementBase {
+  static get observedAttributes() {
+    return [...MOUNT_ATTRIBUTES];
+  }
+
+  #root = null;
+  #frame = null;
+  #capabilities = new Set();
+  #regions = new Set();
+  #preferences = Object.freeze({});
+  #remountQueued = false;
+  /** What the host set as the `identity` PROPERTY, unvalidated; `undefined` when
+   *  it never did, so the attribute and then `config` are read instead. */
+  #identityProperty = undefined;
+  /** The validated identity this mount hands the frame, or null. */
+  #identity = null;
+  /** The host client carrying the one-shot `identify`, while it is in flight. */
+  #identifier = null;
+  /** The host's directory for @mention (`{search, notify}`), or null. */
+  #directory = null;
+  /** The client serving it to the frame, and how to stop. */
+  #directoryServer = null;
+  /** The host's model, `async (request, {signal, onChunk, purpose}) => response`. */
+  #aiProvider = null;
+  /** The client serving it to the frame, and how to stop. */
+  #aiProviderServer = null;
+
+  /** The host's model (`docs/183` §3.8), OpenAI Chat Completions JSON in and out.
+   *  A property, because functions cannot be attributes. Remounts, so the frame
+   *  is told (`?aiProvider=host`) to send its requests here; with none set and no
+   *  `ai-provider` attribute, a framed editor has no AI and sends nothing. */
+  get aiProvider() {
+    return this.#aiProvider;
+  }
+
+  set aiProvider(value) {
+    this.#aiProvider = typeof value === "function" ? value : null;
+    if (this.isConnected && this.#root) this.#queueRemount();
+  }
+
+  /** The host directory for @mention (`docs/175` §7.2): `{ search(query, {limit,
+   *  signal}), notify?(notice) }`. A property, because functions cannot be
+   *  attributes. Remounts, so the frame is told (`?directory=1`) that it may offer a
+   *  picker; with none set, `@` in a comment is plain text and nothing is asked. */
+  get directory() {
+    return this.#directory;
+  }
+
+  set directory(value) {
+    this.#directory = value && typeof value.search === "function" ? value : null;
+    if (this.isConnected && this.#root) this.#queueRemount();
+  }
+
+  /** The identity in force for this mount: validated and frozen, or null when
+   *  none was given or the one given was refused (the refusal is on the
+   *  capabilities event's `notes`). */
+  get identity() {
+    return this.#identity;
+  }
+
+  /** Sets the identity without putting a name in the DOM. Remounts, like every
+   *  other mount input: an identity is decided once per mount (`docs/175` §3.2). */
+  set identity(value) {
+    this.#identityProperty = value ?? undefined;
+    if (this.isConnected && this.#root) this.#queueRemount();
+  }
+
+  /** The role or preset this embed resolved to, as the host asked for it. */
+  get mode() {
+    return this.getAttribute("mode");
+  }
+
+  set mode(value) {
+    if (value === null || value === undefined) this.removeAttribute("mode");
+    else this.setAttribute("mode", String(value));
+  }
+
+  // NO REFLECTING PROPERTY FOR `can` OR `chrome`, and stated rather than left as
+  // an omission. `can(capability)` is already on this prototype and is published
+  // in the package's types and README, so `get can()` would REPLACE it — a silent
+  // break of the one method a host uses to ask what they were granted. Giving the
+  // attribute a different property name to dodge that would put two spellings on
+  // one input, which is the drift this element exists to remove. So the
+  // attributes are set as attributes (`setAttribute`, or markup, in every
+  // framework), and what they RESOLVED to is read back off `capabilities`,
+  // `regions` and `can(name)` — which is the more useful question anyway, because
+  // it is the one the editor was actually mounted with.
+
+  /** What this embed is allowed to do, resolved. Frozen: a host that could
+   *  mutate the returned set would be editing a permission after the fact. */
+  get capabilities() {
+    return Object.freeze([...this.#capabilities]);
+  }
+
+  /** The chrome regions this embed is offered, from the same inputs. The other
+   *  half of what a role names, and frozen for the same reason. */
+  get regions() {
+    return Object.freeze([...this.#regions]);
+  }
+
+  /** Which of the editor's three review modes this capability set means. */
+  get editingMode() {
+    return editingModeFor(this.#capabilities);
+  }
+
+  /** The iframe sandbox tokens in force. */
+  get sandbox() {
+    return sandboxTokensFor(this.#capabilities);
+  }
+
+  /** The live frame, for a host that needs to size or focus it. Null before
+   *  the first mount and after disconnection. */
+  get frame() {
+    return this.#frame;
+  }
+
+  /** Whether a named capability was granted. */
+  can(capability) {
+    return this.#capabilities.has(capability);
+  }
+
+  connectedCallback() {
+    if (!this.#root) this.#root = this.attachShadow({ mode: "open" });
+    this.#mount();
+  }
+
+  disconnectedCallback() {
+    this.#teardown();
+  }
+
+  attributeChangedCallback(name, previous, next) {
+    if (previous === next) return;
+    if (!MOUNT_ATTRIBUTES.includes(name)) return;
+    if (!this.isConnected || !this.#root) return;
+    this.#queueRemount();
+  }
+
+  #queueRemount() {
+    // Coalesce: a host setting `mode` and `editor-src` in the same turn means
+    // one new embed, not two, and booting a WebAssembly instance to throw it
+    // away a microtask later is ~100 MB of pointless work.
+    if (this.#remountQueued) return;
+    this.#remountQueued = true;
+    Promise.resolve().then(() => {
+      this.#remountQueued = false;
+      if (this.isConnected) this.#mount();
+    });
+  }
+
+  /** Builds the frame from scratch. Resolution happens here, before the frame
+   *  is created, so the mode is in the very first URL the frame navigates to. */
+  #mount() {
+    this.#teardown();
+
+    const { url, notes } = this.#resolveUrl();
+    const resolution = {
+      // An element-mounted editor is framed by construction, so the default
+      // when nobody asked is the framed one. This is the same rule the page
+      // applies to itself from `window.self !== window.top`; stating it here
+      // as `framed: true` is not a second mechanism, it is this call site
+      // telling the one authority a fact it cannot read from a URL.
+      framed: true,
+      mode: url.searchParams.get("mode"),
+    };
+    this.#capabilities = resolveCapabilities({
+      ...resolution,
+      autosave: autosaveRequest(url.searchParams.get("autosave")),
+      withhold: url.searchParams.get("can"),
+    });
+    // From the URL the frame is about to be given, not from the attributes, so the
+    // element cannot resolve one thing and navigate to another. The same reason
+    // `mode` is read back off the URL two lines up.
+    this.#regions = resolveRegions({
+      ...resolution,
+      withhold: url.searchParams.get("chrome"),
+      capabilities: this.#capabilities,
+    });
+    // Read back off the URL the frame is about to be given, like the two sets
+    // above, so the element cannot report one thing and navigate to another.
+    this.#preferences = resolvePreferences(url.searchParams.get("prefs"));
+
+    const frame = document.createElement("iframe");
+    // `sandbox` and `src` are both set BEFORE the element enters the document,
+    // so the frame never navigates once unsandboxed and again correctly.
+    frame.setAttribute("sandbox", this.sandbox.join(" "));
+    // `tools` is the Permissions Policy WebMCP reads (`docs/178` M4): it defaults to
+    // `self`, so a cross-origin frame — an editor embedded on a host's site — may
+    // register tools only when its iframe allows it. Granted only on opt-in, so a
+    // host that did not ask for WebMCP never delegates it.
+    const allow = ["clipboard-read", "clipboard-write"];
+    if (url.searchParams.get(AI_TOOLS) === WEBMCP) allow.push("tools");
+    frame.setAttribute("allow", allow.join("; "));
+    frame.setAttribute("referrerpolicy", "same-origin");
+    frame.loading = "eager";
+    const title = this.getAttribute("frame-title") ?? this.getAttribute("aria-label");
+    // An iframe with no accessible name is an axe `frame-title` violation, and
+    // this module has no business inventing English for a host's page. So the
+    // host is told, loudly and once, rather than silently shipped a label in a
+    // language their page may not be in.
+    if (title) frame.title = title;
+    else reportMissingTitle();
+    // The directory flag says only that a directory exists; the directory itself
+    // is served over the frame's message channel once it has loaded.
+    if (this.#directory) url.searchParams.set("directory", "1");
+    else url.searchParams.delete("directory");
+    if (this.#aiProvider && url.searchParams.get(AI_PROVIDER) !== AI_PROVIDER_VALUES.off) url.searchParams.set(AI_PROVIDER, AI_PROVIDER_VALUES.host);
+    frame.src = url.href;
+    this.#directoryServer?.();
+    this.#directoryServer = null;
+    this.#aiProviderServer?.();
+    this.#aiProviderServer = null;
+    if (this.#aiProvider && url.searchParams.get(AI_PROVIDER) === AI_PROVIDER_VALUES.host) {
+      const provider = this.#aiProvider;
+      frame.addEventListener("load", () => this.#serveAiProvider(frame, url.origin, provider), { once: true });
+    }
+    if (this.#directory) {
+      const directory = this.#directory;
+      frame.addEventListener("load", () => this.#serveDirectory(frame, url.origin, directory), { once: true });
+    }
+    // The identity crosses in a MESSAGE, after the frame's scripts have run (a
+    // module script has finished before `load`), never in the URL above. The frame
+    // was told by `awaitIdentity=1` to hold its startup document and room until
+    // this lands.
+    if (this.#identity) {
+      const identity = this.#identity;
+      frame.addEventListener("load", () => this.#identify(frame, url.origin, identity), { once: true });
+    }
+
+    const style = document.createElement("style");
+    style.textContent = SHADOW_STYLE;
+    this.#root.replaceChildren(style, frame);
+    this.#frame = frame;
+
+    this.dispatchEvent(
+      new CustomEvent(CAPABILITIES_EVENT, {
+        bubbles: true,
+        detail: {
+          mode: url.searchParams.get("mode"),
+          // The NORMALISED lists, read back off the URL the frame was given —
+          // so a host listening to this hears what was applied rather than what
+          // they typed, and an unknown entry they wrote is visibly gone.
+          can: url.searchParams.get("can"),
+          chrome: url.searchParams.get("chrome"),
+          capabilities: this.capabilities,
+          regions: this.regions,
+          // The opening positions that survived resolution, keyed by the SETTING
+          // each one moves — the same shape the editor merges over its defaults,
+          // so a host reads back what the container actually opened with rather
+          // than what they typed.
+          preferences: this.preferences,
+          editingMode: this.editingMode,
+          sandbox: this.sandbox,
+          src: url.href,
+          // WHAT WE DID NOT DO, and why. Present on every mount, empty when a
+          // host configured nothing we could not honour. This is the field
+          // ONLYOFFICE has no place for: `_applyCustomization` early-returns on
+          // an unlicensed integrator and on an option it does not know, and an
+          // early return has nothing to say.
+          notes,
+        },
+      }),
+    );
+
+    // Said once per page, like the missing-title warning and for the same reason.
+    // Only the notes that are not plain successes: a console that reports what
+    // worked is a console nobody reads twice.
+    reportNotes(unhandledNotes(notes));
+  }
+
+  /** The frame's URL, with the resolved mode and both withhold lists written
+   *  into it.
+   *
+   *  The `mode` ATTRIBUTE wins over a `mode` the host left in `editor-src`, and
+   *  the effective value is written back so the URL and the capability set can
+   *  never disagree — a frame whose query says one thing while the element
+   *  resolved another is the drift this whole phase exists to remove.
+   *
+   *  `can` and `chrome` are UNIONED with the query's rather than replacing it,
+   *  and normalised through `parseWithheld` before being written back, so the
+   *  frame is navigated to a list the authority has already read: an unknown entry
+   *  is dropped HERE, once, instead of being carried in the URL for the page to
+   *  drop again. Written minus-prefixed because the sign is the part that tells a
+   *  host reading their own URL which direction it goes.
+   *
+   *  Complexity: O(entries) per attribute — at most `CAPABILITIES + REGIONS`. */
+  #resolveUrl() {
+    const base = this.getAttribute("editor-src") || DEFAULT_EDITOR_SRC;
+    // `document.baseURI` rather than `location.href`: a host page with a
+    // `<base>` element means something by it.
+    const url = new URL(base, document.baseURI);
+    // The competitor's config is lowered FIRST, so every attribute below is the
+    // more specific spelling and wins — which is the rule a host would guess:
+    // `config` is the block they brought with them, and an attribute is what
+    // they wrote for us.
+    const translated = translateHostConfig(this.getAttribute("config"));
+    const asked = this.getAttribute("mode") ?? translated.mode ?? url.searchParams.get("mode");
+    // No mode anywhere is a deliberate absence, not an empty string: it must
+    // reach `resolveCapabilities` as "nobody asked", which with `framed: true`
+    // is the embedded default.
+    if (asked === null) url.searchParams.delete("mode");
+    else url.searchParams.set("mode", asked);
+    for (const { attribute, known, fromConfig } of NARROWING) {
+      const merged = [
+        url.searchParams.get(attribute) ?? "",
+        translated[fromConfig].join(","),
+        this.getAttribute(attribute) ?? "",
+      ];
+      const names = parseWithheld(merged.join(","), known);
+      if (names.length) url.searchParams.set(attribute, names.map((name) => `-${name}`).join(","));
+      else url.searchParams.delete(attribute);
+    }
+    // Preferences MERGE rather than union, because they are values and not a
+    // set: the query is the deployment's, the config is what the host brought,
+    // and the attribute is what they wrote here — least to most specific.
+    const prefs = {
+      ...parsePreferenceObject(url.searchParams.get("prefs")),
+      ...translated.prefs,
+      ...parsePreferenceObject(this.getAttribute("prefs")),
+    };
+    // Written back NORMALISED, through the authority, for `can` and `chrome`'s
+    // reason: an unknown name or an unreadable value is dropped HERE, once, and
+    // the frame is navigated to a preference set the editor has already read.
+    const accepted = normalizePreferences(prefs);
+    if (Object.keys(accepted).length) url.searchParams.set("prefs", JSON.stringify(accepted));
+    else url.searchParams.delete("prefs");
+    const lang = this.getAttribute("editor-lang") ?? translated.lang;
+    if (lang) url.searchParams.set("lang", lang);
+    const notes = [...translated.notes, ...this.#resolveIdentity(url, translated.identity)];
+    if (this.getAttribute(AVATARS) === "fetch") url.searchParams.set(AVATARS, "fetch");
+    else url.searchParams.delete(AVATARS);
+    // WebMCP is opt-in and has one spelling. Absent, `editor-src`'s own query is
+    // left as the host wrote it; any other value is dropped and REPORTED, so a typo
+    // reads as "not offered" on the capabilities event instead of in silence.
+    const aiTools = this.getAttribute("ai-tools");
+    if (aiTools === WEBMCP) url.searchParams.set(AI_TOOLS, WEBMCP);
+    else if (aiTools !== null) {
+      url.searchParams.delete(AI_TOOLS);
+      notes.push(Object.freeze({ option: "ai-tools", code: "unknown", message: `ai-tools takes "${WEBMCP}" only.` }));
+    }
+    // The picture-download policy. Absent, `editor-src`'s own query stands. A value
+    // that is none of the three spellings is REPORTED and lowered to "deny": a host
+    // that meant to restrict the network and misspelled it must not get the open
+    // default.
+    const remoteImages = this.getAttribute("remote-images");
+    if (remoteImages !== null) {
+      const policy = remoteImagesPolicy(remoteImages);
+      url.searchParams.set(REMOTE_IMAGES, policy ?? "deny");
+      if (policy === null) {
+        notes.push(Object.freeze({
+          option: "remote-images",
+          code: "unknown",
+          message: 'remote-images takes "direct", "deny" or an http(s) URL containing {url}; downloads are denied.',
+        }));
+      }
+    }
+    // The plugin catalogue is passed through as written: the editor resolves it
+    // against its own URL and checks it (`plugin_catalogue.mjs`).
+    const plugins = this.getAttribute("plugins");
+    if (plugins !== null && plugins.trim()) url.searchParams.set("plugins", plugins.trim());
+    // `ai-provider="off"` is the one attribute value; `host` is written by the
+    // `aiProvider` property at frame creation. Anything else is reported.
+    const aiProvider = this.getAttribute("ai-provider");
+    if (aiProvider === AI_PROVIDER_VALUES.off) url.searchParams.set(AI_PROVIDER, AI_PROVIDER_VALUES.off);
+    else if (aiProvider !== null) {
+      url.searchParams.delete(AI_PROVIDER);
+      notes.push(Object.freeze({ option: "ai-provider", code: "unknown", message: `ai-provider takes "${AI_PROVIDER_VALUES.off}" only; set the aiProvider property to serve a model.` }));
+    }
+    return { url, notes: Object.freeze(notes) };
+  }
+
+  /** The identity for this mount, validated once, and what it did to the URL.
+   *
+   *  Property, then attribute, then `config`'s `editorConfig.user` — most to
+   *  least specific, the order every other input here follows. A valid identity
+   *  makes the frame wait for it (`awaitIdentity=1`) and SUPERSEDES the two
+   *  preferences that also name the person, which are taken out of the URL and
+   *  reported, never silently kept beside it (`docs/175` §3.1). An invalid one is
+   *  not used at all — half an identity is somebody else's — and the refusal is
+   *  reported naming the field.
+   *
+   *  Complexity: O(identity size). */
+  #resolveIdentity(url, fromConfig) {
+    url.searchParams.delete(AWAIT_IDENTITY);
+    const given = this.#identityProperty !== undefined ? this.#identityProperty
+      : this.hasAttribute("identity") ? this.getAttribute("identity")
+        : fromConfig;
+    this.#identity = null;
+    if (given === undefined || given === null) return [];
+    const checked = validateHostIdentity(given);
+    if (!checked.ok) {
+      return [Object.freeze({ option: checked.refusal.field, code: "identity-invalid", message: checked.refusal.message })];
+    }
+    this.#identity = checked.identity;
+    url.searchParams.set(AWAIT_IDENTITY, "1");
+    const notes = [...checked.notes];
+    const prefs = parsePreferenceObject(url.searchParams.get("prefs"));
+    const superseded = IDENTITY_PREFERENCES.filter((name) => name in prefs);
+    for (const name of superseded) {
+      delete prefs[name];
+      notes.push(Object.freeze({
+        option: `prefs.${name}`,
+        code: "superseded-by-identity",
+        message: "The host identity names this person; a preference cannot name them differently.",
+      }));
+    }
+    if (superseded.length) {
+      if (Object.keys(prefs).length) url.searchParams.set("prefs", JSON.stringify(prefs));
+      else url.searchParams.delete("prefs");
+    }
+    return notes;
+  }
+
+  /** Answers the frame's `directory-query` and `mention` events from the host's
+   *  directory, for as long as this frame is the mounted one. */
+  #serveDirectory(frame, origin, directory) {
+    if (this.#frame !== frame) return;
+    let client;
+    try {
+      client = createHostClient({ frame, editorOrigin: origin, view: window });
+    } catch {
+      return;
+    }
+    const stop = client.serveDirectory(directory);
+    this.#directoryServer = () => { stop(); client.dispose(); };
+  }
+
+  /** Answers the frame's `ai-provider` requests from the host's `aiProvider`, for
+   *  as long as this frame is the mounted one. */
+  #serveAiProvider(frame, origin, provider) {
+    if (this.#frame !== frame) return;
+    let client;
+    try {
+      client = createHostClient({ frame, editorOrigin: origin, view: window });
+    } catch {
+      return;
+    }
+    const stop = client.serveAiProvider(provider);
+    this.#aiProviderServer = () => { stop(); client.dispose(); };
+  }
+
+  /** Hands the identity to the frame in the one-shot `identify` request. A
+   *  refusal (a frame that already decided, or one that is not ours) is said
+   *  once in the console with its code, never with the identity. */
+  #identify(frame, origin, identity) {
+    if (this.#frame !== frame) return;
+    let client;
+    try {
+      client = createHostClient({ frame, editorOrigin: origin, view: window });
+    } catch {
+      return;
+    }
+    this.#identifier = client;
+    client
+      .identify(identity)
+      .then((result) => {
+        if (!result?.ok) reportNotes([{ option: "identity", code: result?.refusal?.code ?? "refused", message: result?.refusal?.message ?? "" }]);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (this.#identifier === client) this.#identifier = null;
+        client.dispose();
+      });
+  }
+
+  /** The opening positions in force, keyed by the SETTING each one moves. The
+   *  same shape the editor merges over its defaults; frozen, like the two sets
+   *  above, because a host mutating it would be editing a container after it
+   *  opened. */
+  get preferences() {
+    return this.#preferences;
+  }
+
+  /** Releases the frame. Blanked before removal so the WebAssembly instance,
+   *  its canvases and its heap start being collected before the node is
+   *  detached — the same order `home-embed.js` established for the marketing
+   *  page's live demo, where a leaked instance is ~100 MB. */
+  #teardown() {
+    this.#identifier?.dispose();
+    this.#identifier = null;
+    this.#directoryServer?.();
+    this.#directoryServer = null;
+    this.#aiProviderServer?.();
+    this.#aiProviderServer = null;
+    if (this.#frame) {
+      try {
+        this.#frame.src = "about:blank";
+      } catch {
+        /* a cross-origin editor refuses the write; removal still releases it */
+      }
+      this.#frame.remove();
+      this.#frame = null;
+    }
+    this.#root?.replaceChildren();
+    this.#capabilities = new Set();
+    this.#regions = new Set();
+    this.#preferences = Object.freeze({});
+  }
+}
+
+/** `?autosave=1` / `?autosave=0` as the tri-state the authority expects. */
+function autosaveRequest(value) {
+  return value === "1" ? true : value === "0" ? false : null;
+}
+
+/** Configurations already reported, so a host that remounts on every render is
+ *  told once per distinct answer rather than once per render. */
+const reportedNotes = new Set();
+
+/**
+ * Says out loud what a host's configuration could not do.
+ *
+ * THE HONESTY RULE, in its configuration form. The repository's standing
+ * position is that unsupported data is preserved or REPORTED and never silently
+ * dropped (`SKILL` §12), and a host configuration is data. ONLYOFFICE's
+ * `_applyCustomization` fails the same test from the other direction: it returns
+ * early on an unlicensed integrator and walks past an option it does not know,
+ * both without a word, so an integrator's only signal is a screenshot that looks
+ * wrong.
+ *
+ * `console.warn` and not a throw: a configuration the editor could not fully
+ * honour must still open the document. The full list — successes included — is
+ * on the capabilities event for a host that wants to assert on it.
+ *
+ * Complexity: O(notes).
+ */
+function reportNotes(notes) {
+  if (!notes.length) return;
+  const key = notes.map((note) => `${note.option}:${note.code}`).join("|");
+  if (reportedNotes.has(key)) return;
+  reportedNotes.add(key);
+  const lines = notes.map((note) => `  ${note.option} — ${note.code}: ${note.message}`);
+  console.warn(
+    `<${OPENDOC_EDITOR_TAG}> could not honour ${notes.length} configuration ` +
+      `option(s) as written. Nothing was ignored silently:\n${lines.join("\n")}`,
+  );
+}
+
+let warnedAboutTitle = false;
+
+/** Said once per page, not once per mount: a host that remounts on every render
+ *  should not have their console filled. */
+function reportMissingTitle() {
+  if (warnedAboutTitle) return;
+  warnedAboutTitle = true;
+  console.warn(
+    `<${OPENDOC_EDITOR_TAG}> has no frame-title or aria-label, so the embedded ` +
+      "editor has no accessible name. Set one in your page's language.",
+  );
+}
+
+/**
+ * Registers the element.
+ *
+ * Idempotent, and tolerant of a second copy of this package on the page: two
+ * bundles each calling `customElements.define` for one tag throws, and a host
+ * whose build deduplicated badly should get a working editor rather than a
+ * crash on import.
+ *
+ * @param {string} [tag]
+ * @returns {boolean} whether this call was the one that registered it.
+ */
+export function defineOpenDocEditor(tag = OPENDOC_EDITOR_TAG) {
+  if (typeof customElements === "undefined") return false;
+  if (customElements.get(tag)) return false;
+  customElements.define(tag, OpenDocEditorElement);
+  return true;
+}
+
+export { editingModeFor, resolveCapabilities, resolveRegions, sandboxTokensFor };
+export { CAPABILITIES, LEGACY_PRESETS, PRESET_NAMES, PREFERENCES, REGIONS, ROLES } from "./capabilities.mjs";
+export { resolvePreferences } from "./capabilities.mjs";
+export { NOTE_CODES, OPTIONS, OPTION_PATHS, optionTally, translateHostConfig } from "./host_options.mjs";
+export { IDENTITY_BOUNDS, validateHostIdentity } from "./host_contract.mjs";

@@ -1,0 +1,158 @@
+{
+  "copilot_desktop": "1.1.31",
+  "copilot_sdk": "1.0.31",
+  "workspace": "ternleaf",
+  "word_version": "16.0.20704",
+  "bundle_inventory_sha256": "33c9c251a668180727719447eb0354174a098301d041fd0d405aa25fe4f5c311",
+  "capture_dpi": 360,
+  "tolerance_pt": 0.25,
+  "history": [
+    {
+      "revision": 1,
+      "kind": "edit"
+    },
+    {
+      "revision": 2,
+      "kind": "undo",
+      "target": 1
+    },
+    {
+      "revision": 3,
+      "kind": "redo",
+      "target": 1
+    }
+  ],
+  "source_text_ids": [
+    "77777777",
+    "09D0A737",
+    "77777777",
+    "77777777"
+  ],
+  "edit_text_ids": [
+    "77777777",
+    "66690D1B",
+    "77777777",
+    "77777777"
+  ],
+  "undo_text_ids": [
+    "77777777",
+    "09D0A737",
+    "77777777",
+    "77777777"
+  ],
+  "redo_text_ids": [
+    "77777777",
+    "66690D1B",
+    "77777777",
+    "77777777"
+  ],
+  "native_chart_and_workbook_sha256": [
+    "77f21ee7c23615bd4f2e58dc424705d0551acd873112c70184e132bc6bb214e6",
+    "7fc8e21a5fb854a943bd7e794f154f0e58895c436e4ccb52d4abee02ad8b4d35"
+  ],
+  "anchor_extent": [
+    "4572000",
+    "2286000"
+  ],
+  "source_sha256": "ad650202f23bada119326c6454fb24ae382d56310217dfaf1cc004c0fd72a910",
+  "redo_docx_sha256": "ac28799d73f7024d55c707a2ae34970a9d65a4cc6b723bc7343565eaca06253d",
+  "comparison": {
+    "production_export": true,
+    "glyph_origin_error_pt": {
+      "Header Reference link": [
+        0.024,
+        0.03
+      ],
+      "Alpha KEEP omega": [
+        0.024,
+        0.06
+      ],
+      "Mixed": [
+        0.024,
+        0.01
+      ],
+      "chart": [
+        0.07,
+        0.01
+      ],
+      "endingx": [
+        0.024,
+        0.09
+      ],
+      "Last paragraph": [
+        0.024,
+        0.09
+      ],
+      "First": [
+        0.03,
+        0.01
+      ],
+      "Second": [
+        0.03,
+        0.02
+      ],
+      "Third": [
+        0.03,
+        0.02
+      ]
+    },
+    "browser_color_box_pt": [
+      154.2,
+      116.6,
+      426.4,
+      257.0
+    ],
+    "word_color_box_pt": [
+      154.2,
+      116.6,
+      426.2,
+      257.0
+    ],
+    "box_edge_delta_pt": [
+      0.0,
+      0.0,
+      0.2,
+      0.0
+    ],
+    "bar_and_legend_edge_errors_pt": [
+      [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.2,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.2,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    ],
+    "maximum_error_pt": 0.2,
+    "passes_existing_0_25_pt_threshold": true
+  }
+}

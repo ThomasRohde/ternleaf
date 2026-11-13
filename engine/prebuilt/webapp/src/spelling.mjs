@@ -1,0 +1,987 @@
+// Spelling: every decision, as plain functions over plain data.
+//
+// Designed in `docs/114`; the row is `docs/109` HF-035 / `docs/105` OO-003.
+// The DOM half — the lazy fetch, the windowed scan, the overlay markers and the
+// context-menu rows — lives in `spell_check.mjs`. Nothing here touches the
+// browser or the engine, which is what lets the rules that actually decide
+// whether a word is wrong be unit-tested in node with no wasm behind them.
+//
+// Three constraints shape this file, all of them from the project rather than
+// from spelling:
+//
+//   1. **No runtime npm dependency.** `webapp/package.json` has none and adding
+//      the first one is the owner's decision, so there is no Hunspell engine
+//      here: the dictionary is a pre-expanded word list and membership is a
+//      `Set` lookup. `docs/114` §2 works through why that is not a compromise.
+//   2. **Per-keystroke work is O(1) in document size** (`docs/107` §4). Nothing
+//      on the keystroke path may touch the dictionary; `SpellScheduler` below is
+//      the whole of what a keystroke pays, and it is the same three
+//      constant-time steps `drafts.mjs`'s `DraftScheduler.noteDirty()` takes.
+//   3. **Suggestions cost only what the caller lets them.** They used to be
+//      computed on right-click and never while checking (`docs/114` §5.4),
+//      because the bounded dictionary scan costs 2.6-19.5 ms and that was being
+//      paid on the main thread inside a menu open. They now run in the proofing
+//      worker while checking (`docs/146` §4, ADR-042), which removes that
+//      reason — so `suggestionsFor` takes a `deepScan` flag and the caller
+//      budgets it. The scan itself still only ever asks "is this word in the
+//      list".
+
+/** Separates a dictionary file's common tier from the rest. Written by
+ *  `tools/build-dictionary.mjs`; see `docs/114` §2.4. */
+export const SECTION_SEPARATOR = "---";
+
+/** The language a document with no `w:lang` — or an unreadable one — is checked
+ *  against. Deliberately NOT `navigator.language`: that makes the tests
+ *  non-deterministic for no user benefit (`docs/114` §4.1). */
+export const DEFAULT_SPELL_LANGUAGE = "en-US";
+
+/** The dictionary files that exist, as shipped in `webapp/dict/`. */
+export const SPELL_LANGUAGES = Object.freeze(["en-US", "en-GB"]);
+
+/** The product and industry glossary, which is language-independent and so is
+ *  its own file rather than a section of each dictionary. */
+export const GLOSSARY_FILE = "glossary";
+
+/**
+ * Parses `dict/glossary.txt` — one term per line, sorted, no sections.
+ *
+ * A THIRD tier, distinct from both the dictionary and the personal dictionary
+ * (`docs/114` §12). It ships with the product and is the same for everyone; the
+ * personal dictionary is the user's and lives only in their browser. Keeping
+ * them apart is not tidiness: a glossary term must never appear as something
+ * the user added, and clearing one must not unflag the other's words.
+ */
+export function parseGlossary(text) {
+  return new Set(
+    String(text ?? "")
+      .replace(/\r\n/g, "\n")
+      .split("\n")
+      .filter((line) => line.length > 0),
+  );
+}
+
+/** BCP-47 tag → the dictionary that checks it, or `null` for "not checkable".
+ *
+ *  The Commonwealth dialects share the en-GB list, which is what LibreOffice
+ *  and Word's own dictionary sharing does; any other `en-*` falls back to
+ *  en-US. Adding French is adding one file and one row here.
+ *
+ *  Returning `null` rather than quietly defaulting is the point: a document in
+ *  a language we have no list for must SAY so (`docs/114` §2.5, SKILL.md §10),
+ *  because a checker that silently stops looks exactly like a clean document. */
+export function dictionaryForLanguage(tag) {
+  const normalized = String(tag ?? "").trim().replace(/_/g, "-");
+  if (!normalized) return DEFAULT_SPELL_LANGUAGE;
+  const [primary, ...rest] = normalized.split("-");
+  if (primary.toLowerCase() !== "en") return null;
+  const region = (rest.at(-1) ?? "").toUpperCase();
+  if (region === "GB" || region === "UK") return "en-GB";
+  if (["CA", "AU", "NZ", "IE", "ZA", "IN"].includes(region)) return "en-GB";
+  return "en-US";
+}
+
+/** What the status bar says about a language nothing can check. Named, not
+ *  generic: the user has to be able to tell "off" from "unsupported". */
+export function unsupportedLanguageMessage(tag) {
+  return `No spelling dictionary for ${tag}`;
+}
+
+/**
+ * Parses a dictionary file into its two tiers.
+ *
+ * The file is the common tier, a line of `---`, then the rest — both sorted,
+ * so the artifact stays diffable and this is one `indexOf` plus two `split`s.
+ * A file with no separator is treated as one tier, which keeps a hand-written
+ * test fixture usable.
+ */
+export function parseDictionary(text) {
+  const body = String(text ?? "").replace(/\r\n/g, "\n");
+  const marker = `\n${SECTION_SEPARATOR}\n`;
+  const at = body.startsWith(`${SECTION_SEPARATOR}\n`) ? 0 : body.indexOf(marker);
+  const split = (chunk) => chunk.split("\n").filter((line) => line.length > 0);
+  if (at < 0) {
+    const all = new Set(split(body));
+    return { common: new Set(), all };
+  }
+  const head = at === 0 ? "" : body.slice(0, at);
+  const tail = body.slice(at === 0 ? SECTION_SEPARATOR.length + 1 : at + marker.length);
+  const common = new Set(split(head));
+  const all = new Set([...common, ...split(tail)]);
+  return { common, all };
+}
+
+/** An empty dictionary — what the checker holds before a fetch resolves, so
+ *  every caller has the same shape to work against. */
+export function emptyDictionary() {
+  return { common: new Set(), all: new Set() };
+}
+
+// ---- Tokenizing ------------------------------------------------------------
+
+/** THE apostrophe, as one character class, spelled once.
+ *
+ *  Real text carries two: U+0027 from a keyboard and U+2019 from smart quotes,
+ *  which are on in this product. Every rule in this file that touches an
+ *  apostrophe has to accept both, and the reported defect was one rule
+ *  (`possessiveStem`) spelling it `['’]` while the lookup spelled it `'` — so
+ *  every `…’s` contraction was accepted and every other one was flagged. A rule
+ *  that is spelled in four places is a rule that will diverge again, so the
+ *  class is a named constant and every site below composes it. */
+const PLAIN_APOSTROPHE = "'";
+const TYPOGRAPHIC_APOSTROPHE = "’";
+const APOSTROPHE_CLASS = PLAIN_APOSTROPHE + TYPOGRAPHIC_APOSTROPHE;
+
+/** The two apostrophes and the hyphen: the connectors a word may carry inside
+ *  it but not at either end. */
+const CONNECTOR = new RegExp(`[${APOSTROPHE_CLASS}-]`, "u");
+
+/** Characters that can be INSIDE a word. Letters and marks, plus the two
+ *  apostrophes (`don't`, `don’t`) and the hyphen — the hyphen is kept so a
+ *  token like `e-mail` can be recognized and then split, rather than producing
+ *  two tokens one of which is a single letter. */
+const WORD_BODY = new RegExp(`[\\p{L}\\p{M}\\p{Nd}${APOSTROPHE_CLASS}-]`, "u");
+
+/** Scalars that join an EMOJI cluster and never belong to a word.
+ *
+ *  U+FE0F (and the rest of the variation selectors) is Unicode category Mn, so
+ *  `\p{M}` above matched it and the tokenizer glued it onto whatever followed:
+ *  `"see ❤️world"` produced the token `"\uFE0Fworld"`, flagged a correctly
+ *  spelled word, and gave the replacement a span STARTING INSIDE the heart's
+ *  grapheme cluster — so accepting the suggestion ate the variation selector
+ *  and turned a red heart into a monochrome dingbat. A word boundary must not
+ *  fall inside a cluster.
+ *
+ *  U+200D is Cf and never matched, but it is listed for the same reason and so
+ *  the rule reads as one rule. */
+const CLUSTER_JOINER = /[\u200d\ufe00-\ufe0f]/u;
+
+/** Whether `ch` (one UTF-16 code unit) can sit inside a word. */
+function isWordChar(ch) {
+  return WORD_BODY.test(ch) && !CLUSTER_JOINER.test(ch);
+}
+
+/**
+ * The spans of `text` that are an address rather than prose: a URL, an email,
+ * a bare host name, a file path, or a dotted identifier.
+ *
+ * This is a correction to `docs/114` §5.3, which proposed skipping "a token
+ * containing `://`, `@`, or a `.` between two letters". That rule cannot fire:
+ * `:`, `/`, `@` and `.` are not word characters, so `http://x.com` is never ONE
+ * token — it tokenizes as `http`, `x`, `com`, and `info@docscentre.com` (which
+ * really is in the fidelity corpus) as `info`, `docscentre`, `com`. Three of
+ * those six are not English words and every one of them would have been
+ * squiggled. So the addresses are found in the TEXT first and any token inside
+ * one is dropped.
+ *
+ * Returns `[[start, end], …]` in JS string indices, in order, possibly
+ * overlapping. O(text.length).
+ */
+export function addressSpans(text) {
+  const source = String(text ?? "");
+  const patterns = [
+    // scheme://rest, and the `mailto:`/`tel:` shapes that have no slashes
+    /[A-Za-z][A-Za-z0-9+.-]*:\/\/\S+/gu,
+    /\b(?:mailto|tel|file|data):\S+/gu,
+    // an email address
+    /[^\s@<>()[\]]+@[^\s@<>()[\]]+\.[A-Za-z]{2,}/gu,
+    // a dotted host or file name — `docscentre.com`, `www.x.co.uk`, `notes.txt`
+    /\b(?:[\p{L}\p{Nd}_-]+\.)+[A-Za-z]{2,}\b/gu,
+    // a path, POSIX or Windows, with at least one separator between segments
+    /\b[\p{L}\p{Nd}_.-]*(?:[/\\][\p{L}\p{Nd}_.-]+)+/gu,
+  ];
+  const spans = [];
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) {
+      spans.push([match.index, match.index + match[0].length]);
+    }
+  }
+  return spans.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+}
+
+/**
+ * Every word-shaped token in `text`, as `{ start, end, word }` in JS string
+ * indices (UTF-16 code units — the caller converts to the engine's UTF-8 byte
+ * offsets, which is what `byteOffsetToStringIndex` already does the other way).
+ *
+ * O(text.length). The caller only ever hands it ONE paragraph.
+ */
+export function tokenizeWords(text) {
+  const source = String(text ?? "");
+  const tokens = [];
+  let start = -1;
+  for (let i = 0; i <= source.length; i += 1) {
+    const inWord = i < source.length && isWordChar(source[i]);
+    if (inWord && start < 0) start = i;
+    if (!inWord && start >= 0) {
+      // Trim leading/trailing connectors: `"don't"` keeps its apostrophe but
+      // `'quoted'` and `dash-` do not carry one into the lookup.
+      let from = start;
+      let to = i;
+      while (from < to && CONNECTOR.test(source[from])) from += 1;
+      while (to > from && CONNECTOR.test(source[to - 1])) to -= 1;
+      if (to > from) tokens.push({ start: from, end: to, word: source.slice(from, to) });
+      start = -1;
+    }
+  }
+  return tokens;
+}
+
+// ---- Skip rules ------------------------------------------------------------
+
+/**
+ * Why `word` is not checkable at all, or `""` when it is.
+ *
+ * Each rule removes a class of token that a dictionary can only be wrong
+ * about. The two Word offers as options are options here too, defaulting on,
+ * which is what `105` OO-003 asks for.
+ *
+ * A token containing `://`, `@`, or a `.` between two letters is an address,
+ * not prose. NOTE for whoever writes a test: the fidelity corpus contains
+ * `info@docscentre.com`, so `@` must never be used as a probe marker either
+ * (`docs/114` §5.3) — use something like `QZX`.
+ */
+export function skipReason(word, { ignoreNumbers = true, ignoreUpper = true } = {}) {
+  if (word.length <= 1) return "single character";
+  if (/:\/\//.test(word) || word.includes("@")) return "address";
+  if (/\p{L}\.\p{L}/u.test(word)) return "address";
+  if (ignoreNumbers && /\p{Nd}/u.test(word)) return "contains a digit";
+  if (ignoreUpper && word === word.toUpperCase() && /\p{L}/u.test(word)) return "all caps";
+  if (!/\p{L}/u.test(word)) return "no letters";
+  return "";
+}
+
+// ---- The capitalization rule ------------------------------------------------
+
+/** Hunspell's rule, not a lowercase comparison (`docs/114` §5.3):
+ *
+ *   * a **lower-case** entry matches the word in lower case, Title Case or ALL
+ *     CAPS — `apple` accepts `apple`, `Apple`, `APPLE`;
+ *   * a **Title-case** entry matches only Title Case and ALL CAPS — `London`
+ *     accepts `London` and `LONDON`, and `london` stays flagged.
+ *
+ *  That is what Word does, and it is why including SCOWL's proper-name lists
+ *  does not throw away the information case carries.
+ */
+function matchesWithCase(word, dictionary) {
+  if (dictionary.has(word)) return true;
+  const lower = word.toLowerCase();
+  if (word !== lower && dictionary.has(lower)) {
+    // A word that is not all-lower matches a lower-case entry only when its
+    // own shape is Title Case or ALL CAPS — `iPhone` typed as `iPHone` should
+    // not be accepted by the entry `iphone`.
+    const upper = word.toUpperCase();
+    const title = word[0].toUpperCase() + lower.slice(1);
+    if (word === upper || word === title) return true;
+  }
+  if (word === word.toUpperCase()) {
+    const title = word[0] + word.slice(1).toLowerCase();
+    if (dictionary.has(title)) return true;
+  }
+  return false;
+}
+
+/**
+ * The typographic apostrophe folded to the typewriter one, for LOOKUP ONLY.
+ *
+ * ## Why this exists, measured
+ *
+ * The word lists carry 77 apostrophe entries each (`don't`, `can't`, `we're`,
+ * `I've`, `o'clock`, `ma'am`, `O'Neill`…) and **every one of them is written
+ * with U+0027**: `grep -c "’" webapp/dict/en-US.txt` is 0. Smart quotes are on
+ * in this product, so what a reader actually has in the document is U+2019 —
+ * and `Set.has("don’t")` is false. Measured before this fix: `don’t`, `can’t`
+ * and `we’re` were all flagged as misspellings, each one offering its own
+ * straight-apostrophe spelling as the "correction".
+ *
+ * `it’s` was NOT flagged, and that near miss is the whole finding. The
+ * possessive rule below already spells the apostrophe as `['’]`, so every
+ * `…’s` contraction was accepted while every other contraction was flagged —
+ * one rule (the two apostrophes are the same character for lookup) implemented
+ * in exactly one of the places that needs it. `SKILL.md` §8: two
+ * implementations of one rule diverge. So it is stated once, here, and applied
+ * at the one place the comparison happens.
+ *
+ * Only the LOOKUP is folded, for the same reason `isKnownWord` only normalizes
+ * the lookup: the token keeps its original form, so the offsets that address
+ * the document and the word shown in the menu are untouched.
+ */
+function foldApostrophes(word) {
+  return word.includes(TYPOGRAPHIC_APOSTROPHE)
+    ? word.replaceAll(TYPOGRAPHIC_APOSTROPHE, PLAIN_APOSTROPHE)
+    : word;
+}
+
+/** Strips one trailing possessive `'s` / `’s`, or returns `null`. The file
+ *  deliberately does not carry the ~29,500 possessive forms SCOWL ships
+ *  (`tools/build-dictionary.mjs`), so they are handled by rule.
+ *
+ *  It is handed a word that `isKnownWord` has already folded, so it could spell
+ *  the apostrophe `'` — it composes `APOSTROPHE_CLASS` anyway, because a rule
+ *  that is only correct while its caller remembers to fold is the rule that
+ *  broke, and this one is one `match` away from being called from somewhere
+ *  else. */
+const POSSESSIVE = new RegExp(`^(.*\\p{L})[${APOSTROPHE_CLASS}]s$`, "u");
+
+function possessiveStem(word) {
+  const match = word.match(POSSESSIVE);
+  return match ? match[1] : null;
+}
+
+/**
+ * Whether `word` is spelled correctly against `dictionary` (a `Set`), the
+ * user's `personal` words, the session `ignored` set, the shipped `glossary` and
+ * an installed language pack's `supplement`.
+ *
+ * ## The four tiers, and why `supplement` is a FOURTH rather than more glossary
+ *
+ * `docs/114` §12 keeps the tiers apart deliberately, and the docstring above
+ * `parseGlossary` says what each one is: the dictionary is a language, the
+ * glossary ships with the product and is the same for everyone, the personal
+ * dictionary is the user's and lives only in their browser. A language pack
+ * (`docs/146` §6, ADR-042, Increment B) is none of those three:
+ *
+ *   * it is **per locale**, where the glossary is language-independent;
+ *   * it is **installable and removable**, where the glossary is part of the
+ *     build — so "which tier accepted this word" is the difference between a
+ *     word that stops being accepted when a pack is removed and one that never
+ *     will;
+ *   * it is **versioned**, and its version is in the result cache key
+ *     (`proof_packs.mjs` `activePackVersion`), where the glossary's is not.
+ *
+ * Unioning pack words into `glossary` would have been two fewer arguments and
+ * would have made all three of those facts unanswerable — a pack term would
+ * appear to the rest of the system as something the product shipped, removing a
+ * pack could not invalidate anything, and `suggestionsFor`'s glossary ranking
+ * (which exists so a mistyped PRODUCT name suggests the product name) would be
+ * scoring a general vocabulary. So it is its own set, matched with the same
+ * capitalization rule the others get.
+ *
+ * O(1) in the document and O(1) in the dictionary — a handful of `Set` lookups.
+ */
+export function isKnownWord(
+  rawWord,
+  dictionary,
+  { personal, ignored, glossary, supplement } = {},
+) {
+  if (!rawWord) return true;
+  // NORMALIZE BEFORE COMPARING. SCOWL, the glossary and anything a user types
+  // into a dialog are NFC; a `.docx` can carry NFD, where `café` is `cafe` plus
+  // U+0301 — the same word, a different string, and `Set.has` says no. Found by
+  // the combining-character case of the UTF-16/UTF-8 offset guard
+  // (`docs/146` §9), where a correctly spelled decomposed word was flagged.
+  //
+  // Only the LOOKUP is normalized. The token keeps its original form, so the
+  // offsets that address the document and the word shown in the menu are
+  // untouched — normalizing those would move a range by a code unit.
+  const typed = rawWord.normalize("NFC");
+  // The typographic apostrophe is folded with the same justification and in the
+  // same breath as NFC: it is a different string for the same word, and the
+  // lists are written with U+0027 (see `foldApostrophes`).
+  //
+  // The user's OWN two sets are matched against the word as typed as well as
+  // folded, because those entries are recorded from the flagged token — a
+  // reader who used "Ignore all" on a word carrying U+2019 stored it that way,
+  // and folding only the lookup would stop honouring their decision.
+  const word = foldApostrophes(typed);
+  const mine = (set, candidate) => set.has(candidate) || set.has(candidate.toLowerCase());
+  if (personal && (mine(personal, word) || mine(personal, typed))) return true;
+  if (ignored && (mine(ignored, word) || mine(ignored, typed))) return true;
+  // The glossary is matched with the SAME capitalization rule the dictionary
+  // gets, so `OpenDoc` accepts `OPENDOC` and `opendoc` accepts `Opendoc`, and
+  // a term recorded in Title case still carries that information.
+  if (glossary && matchesWithCase(word, glossary)) return true;
+  // The installed language pack. AFTER the dictionary's own tiers and before the
+  // hyphen rule, so a pack cannot change what any other tier answers — it only
+  // ever adds — and so a compound of pack words is accepted the same way a
+  // compound of dictionary words is.
+  if (supplement && matchesWithCase(word, supplement)) return true;
+  if (matchesWithCase(word, dictionary)) return true;
+  const stem = possessiveStem(word);
+  if (stem && matchesWithCase(stem, dictionary)) return true;
+  if (stem && glossary && matchesWithCase(stem, glossary)) return true;
+  if (stem && supplement && matchesWithCase(stem, supplement)) return true;
+  if (stem && personal && personal.has(stem)) return true;
+  // A hyphenated compound is correct when every part is (`e-mail`, `well-known`,
+  // and `casual-doc-layout`, which is how the glossary covers a crate name
+  // without carrying one entry per crate).
+  if (word.includes("-")) {
+    const parts = word.split("-").filter((part) => part.length > 0);
+    if (
+      parts.length > 1 &&
+      parts.every((part) =>
+        isKnownWord(part, dictionary, { personal, ignored, glossary, supplement }),
+      )
+    )
+      return true;
+  }
+  return false;
+}
+
+/**
+ * Every misspelling in one paragraph's text, as `{ start, end, word }` in JS
+ * string indices.
+ *
+ * `caretOffset`, when given, suppresses the word the caret is inside — Word's
+ * behaviour, and the reason the common case of typing costs nothing at all
+ * (`docs/114` §3).
+ *
+ * O(paragraph length). It is never called on more than the paragraphs in the
+ * page window (`docs/114` §5.2).
+ */
+export function findMisspellings(text, dictionary, options = {}) {
+  const { caretOffset = null, personal, ignored, glossary, supplement, ...skipOptions } = options;
+  const spans = addressSpans(text);
+  const inAddress = (token) =>
+    spans.some(([from, to]) => token.start < to && token.end > from);
+  const found = [];
+  for (const token of tokenizeWords(text)) {
+    if (caretOffset !== null && caretOffset >= token.start && caretOffset <= token.end) continue;
+    if (skipReason(token.word, skipOptions)) continue;
+    if (inAddress(token)) continue;
+    if (isKnownWord(token.word, dictionary, { personal, ignored, glossary, supplement })) continue;
+    found.push(token);
+  }
+  return found;
+}
+
+// ---- Suggestions ------------------------------------------------------------
+
+const EDIT_ALPHABET = "abcdefghijklmnopqrstuvwxyz'";
+
+/** Every Damerau-Levenshtein distance-1 edit of `word`: deletion, transposition,
+ *  replacement, insertion. ~`54n + 25` strings for an `n`-character word, so a
+ *  membership test over all of them is a few hundred `Set` lookups. */
+function edits1(word) {
+  const out = new Set();
+  for (let i = 0; i < word.length; i += 1) {
+    out.add(word.slice(0, i) + word.slice(i + 1));
+    if (i + 1 < word.length) {
+      out.add(word.slice(0, i) + word[i + 1] + word[i] + word.slice(i + 2));
+    }
+    for (const c of EDIT_ALPHABET) {
+      out.add(word.slice(0, i) + c + word.slice(i + 1));
+      out.add(word.slice(0, i) + c + word.slice(i));
+    }
+  }
+  for (const c of EDIT_ALPHABET) out.add(word + c);
+  out.delete(word);
+  return out;
+}
+
+/** Re-applies the input word's case to a lower-case candidate, so a suggestion
+ *  for `Teh` reads `The` and one for `TEH` reads `THE`. */
+function matchCase(candidate, like) {
+  if (like === like.toUpperCase() && like !== like.toLowerCase()) return candidate.toUpperCase();
+  if (like[0] === like[0].toUpperCase()) return candidate[0].toUpperCase() + candidate.slice(1);
+  return candidate;
+}
+
+/** How a candidate differs from the word, cheapest kind first. Hunspell ranks
+ *  by edit KIND before anything else (`swapchar` before `badchar` before
+ *  `forgotchar`) and it is the difference between `teh` → `the` and
+ *  `teh` → `tea`: all four of tea/tee/ten/the are one edit away, in the common
+ *  tier, and start with `t`, so without this the tie breaks alphabetically and
+ *  the right answer comes fourth. */
+const EDIT_TRANSPOSE = 0;
+const EDIT_EXTRA = 1; // the typed word has a character too many
+const EDIT_SUBSTITUTE = 2;
+const EDIT_MISSING = 3; // the typed word is missing a character
+
+function editKind(word, candidate) {
+  if (candidate.length < word.length) return EDIT_EXTRA;
+  if (candidate.length > word.length) return EDIT_MISSING;
+  let first = -1;
+  let differences = 0;
+  for (let i = 0; i < word.length; i += 1) {
+    if (word[i] === candidate[i]) continue;
+    differences += 1;
+    if (first < 0) first = i;
+    if (differences > 2) return EDIT_SUBSTITUTE;
+  }
+  if (
+    differences === 2 &&
+    word[first] === candidate[first + 1] &&
+    word[first + 1] === candidate[first]
+  )
+    return EDIT_TRANSPOSE;
+  return EDIT_SUBSTITUTE;
+}
+
+// ---- The ranking metric (audit CRITIC-09) -------------------------------------
+//
+// Plain edit distance cannot tell the typo a person makes from the one they do
+// not: `mispeled` is two edits from `misdeed`, `misled` AND `misspelled`, and
+// the first two came first. Typing errors are not uniform, so the edits are
+// not either. Each cost below is the noisy-channel idea in its simplest form
+// (Kernighan, Church and Gale's spelling corrector; Hunspell's REP/KEY tables):
+// the commoner a slip, the cheaper the edit that undoes it.
+//
+//   - a doubled or undoubled letter (`mispeled` → `misspelled`, `occurence`)  0.5
+//   - two neighbouring letters swapped (`teh` → `the`)                        0.5
+//   - a letter replaced by its keyboard neighbour (`ytpo` → `typo`)           0.6
+//   - a vowel replaced by another vowel (`seperate`, `definately`)            0.7
+//   - anything else (insert, delete, replace)                                 1
+
+/** QWERTY rows, for keyboard adjacency. A keyboard layout is a locale fact; the
+ *  metric only lowers costs, so on another layout it degrades to plain distance
+ *  rather than misranking. */
+const KEY_ROWS = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
+const KEY_NEIGHBOURS = (() => {
+  const near = new Map();
+  const add = (a, b) => {
+    if (!a || !b) return;
+    if (!near.has(a)) near.set(a, new Set());
+    near.get(a).add(b);
+  };
+  KEY_ROWS.forEach((row, r) => {
+    for (let i = 0; i < row.length; i += 1) {
+      add(row[i], row[i - 1]);
+      add(row[i], row[i + 1]);
+      // The row below is offset half a key to the right: its keys i-1 and i
+      // touch this row's key i, and symmetrically the row above's i and i+1.
+      const below = KEY_ROWS[r + 1];
+      if (below) {
+        add(row[i], below[i - 1]);
+        add(row[i], below[i]);
+        add(below[i - 1], row[i]);
+        add(below[i], row[i]);
+      }
+    }
+  });
+  return near;
+})();
+const VOWELS = new Set("aeiouy");
+
+function substitutionCost(a, b) {
+  if (a === b) return 0;
+  if (KEY_NEIGHBOURS.get(a)?.has(b)) return 0.6;
+  if (VOWELS.has(a) && VOWELS.has(b)) return 0.7;
+  return 1;
+}
+
+/**
+ * The weighted Damerau-Levenshtein distance from `typed` to `candidate`, with
+ * the costs above. Exported for its own tests.
+ *
+ * O(|typed| × |candidate|). It ranks the few dozen candidates the bounded
+ * search already found, never the dictionary, so it adds microseconds to a
+ * suggestion request and nothing to checking.
+ */
+export function weightedEditDistance(typed, candidate) {
+  const n = typed.length;
+  const m = candidate.length;
+  const d = Array.from({ length: n + 1 }, () => new Float64Array(m + 1));
+  // Inserting or deleting a letter beside an equal letter is a doubling slip.
+  const insertCost = (j) =>
+    candidate[j - 1] === candidate[j - 2] || candidate[j - 1] === candidate[j] ? 0.5 : 1;
+  const deleteCost = (i) =>
+    typed[i - 1] === typed[i - 2] || typed[i - 1] === typed[i] ? 0.5 : 1;
+  for (let i = 1; i <= n; i += 1) d[i][0] = d[i - 1][0] + deleteCost(i);
+  for (let j = 1; j <= m; j += 1) d[0][j] = d[0][j - 1] + insertCost(j);
+  for (let i = 1; i <= n; i += 1) {
+    for (let j = 1; j <= m; j += 1) {
+      let value = Math.min(
+        d[i - 1][j] + deleteCost(i),
+        d[i][j - 1] + insertCost(j),
+        d[i - 1][j - 1] + substitutionCost(typed[i - 1], candidate[j - 1]),
+      );
+      if (i > 1 && j > 1 && typed[i - 1] === candidate[j - 2] && typed[i - 2] === candidate[j - 1]) {
+        value = Math.min(value, d[i - 2][j - 2] + 0.5);
+      }
+      d[i][j] = value;
+    }
+  }
+  return d[n][m];
+}
+
+/** The doubling and undoubling edits two letters deep (`mispeled` →
+ *  `misspelled`, `acomodate` → `accommodate`). Plain distance-2 generation is
+ *  too expensive to run (`suggestionsFor` says why); this slice of it is the
+ *  commonest distance-2 typo and costs O(n²) strings, a few dozen. */
+function doublings2(word) {
+  const once = new Set();
+  for (let i = 0; i < word.length; i += 1) {
+    once.add(word.slice(0, i + 1) + word[i] + word.slice(i + 1)); // double letter i
+    if (i > 0 && word[i] === word[i - 1]) once.add(word.slice(0, i) + word.slice(i + 1)); // undouble
+  }
+  const twice = new Set();
+  for (const first of once) {
+    for (let i = 0; i < first.length; i += 1) {
+      twice.add(first.slice(0, i + 1) + first[i] + first.slice(i + 1));
+      if (i > 0 && first[i] === first[i - 1]) twice.add(first.slice(0, i) + first.slice(i + 1));
+    }
+  }
+  twice.delete(word);
+  return twice;
+}
+
+/**
+ * Damerau-Levenshtein distance between `a` and `b`, or `max + 1` as soon as it
+ * is provably greater than `max`.
+ *
+ * O(|a| × |b|) worst case, but the early abort and the band around the diagonal
+ * make it a few dozen cell updates for the length-filtered candidates it is
+ * actually run on. It is the inner loop of `suggestionsFor`'s second stage and
+ * is exported so its own behaviour can be unit-tested.
+ */
+/** Three scratch rows, reused across calls and grown on demand.
+ *
+ *  Allocating them per call — three holey `Array`s per ROW, tens of thousands
+ *  of times per right-click — measured 5–10× slower than this on the shipped
+ *  list. Safe because JavaScript here is single-threaded and the function is
+ *  not reentrant: nothing it calls calls it back. */
+let distanceRows = [new Int32Array(64), new Int32Array(64), new Int32Array(64)];
+
+function distanceScratch(size) {
+  if (distanceRows[0].length < size) {
+    const grown = Math.max(size, distanceRows[0].length * 2);
+    distanceRows = [new Int32Array(grown), new Int32Array(grown), new Int32Array(grown)];
+  }
+  return distanceRows;
+}
+
+export function boundedEditDistance(a, b, max) {
+  const n = a.length;
+  const m = b.length;
+  if (Math.abs(n - m) > max) return max + 1;
+  if (n === 0) return m;
+  if (m === 0) return n;
+  const rows = distanceScratch(m + 1);
+  let twoAgo = rows[0];
+  let previous = rows[1];
+  let current = rows[2];
+  for (let j = 0; j <= m; j += 1) previous[j] = j;
+  for (let i = 1; i <= n; i += 1) {
+    current[0] = i;
+    let rowMin = i;
+    const lo = Math.max(1, i - max - 1);
+    const hi = Math.min(m, i + max + 1);
+    for (let j = 1; j <= m; j += 1) {
+      if (j < lo || j > hi) {
+        current[j] = max + 1;
+        continue;
+      }
+      const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+      let value = Math.min(current[j - 1] + 1, previous[j] + 1, previous[j - 1] + cost);
+      if (
+        i > 1 &&
+        j > 1 &&
+        a.charCodeAt(i - 1) === b.charCodeAt(j - 2) &&
+        a.charCodeAt(i - 2) === b.charCodeAt(j - 1)
+      ) {
+        value = Math.min(value, twoAgo[j - 2] + 1);
+      }
+      current[j] = value;
+      if (value < rowMin) rowMin = value;
+    }
+    if (rowMin > max) return max + 1;
+    const spare = twoAgo;
+    twoAgo = previous;
+    previous = current;
+    current = spare;
+  }
+  return previous[m];
+}
+
+/**
+ * Up to `limit` suggestions for `word`, best first.
+ *
+ * Two stages, both paid ONLY when the context menu opens for one word — never
+ * on the scan path, which asks nothing but "is this word in the list"
+ * (`docs/114` §5.4).
+ *
+ *   1. Generate the ~`54n + 25` distance-1 edits and keep those in the list.
+ *      A few hundred `Set` lookups: sub-millisecond.
+ *   2. Only if that found fewer than three, scan the dictionary with a bounded
+ *      Damerau-Levenshtein, length-filtered and first-two-characters-filtered.
+ *
+ * **Stage 2 is a deliberate departure from `docs/114` §5.4**, which specified
+ * generating distance-2 edits and estimated "~360,000 lookups, tens of
+ * milliseconds". Measured on the shipped 83,775-word en-US list, generating the
+ * distance-2 neighbourhood costs **1.5–3.5 seconds** (the cost is building
+ * ~200,000 strings, not looking them up), which would lock the tab on a
+ * right-click. The bounded scan over the dictionary answers the same question
+ * in **4–26 ms** for the same words and ranks better, because it knows each
+ * candidate's real distance instead of inferring it from which pass found it.
+ *
+ * Ranking: a capitalization-only fix first (see below), then distance, then
+ * same first letter (typists rarely get the first letter wrong), then edit
+ * kind, then the common tier, then length difference, then alphabetical — a
+ * total order, so the tests can name cases.
+ *
+ * ## A capitalization-only correction is a distance-ZERO suggestion
+ *
+ * Stage 1 generates the distance-1 edits of the LOWER-CASED word, and
+ * `consider` dropped any candidate equal to that lower-cased form — on the
+ * assumption that the word itself is never its own correction. For a word whose
+ * only fault is its case, it is the correction, and the assumption silently
+ * removed the right answer.
+ *
+ * Measured on the shipped list before this fix: `i'm` offered
+ * `["I'd", "ism", "h'm"]`, `i've` offered `["I'm", "ice", "ire", "ivy",
+ * "idle"]`, `i'd` offered `["id", "I'm", "it'd"]`. `I'm` is in `en-US.txt`
+ * (line 69) and `canonical("i'm")` already returned it — it was simply never
+ * considered. The junk comes from the distance-2 fallback that runs because
+ * stage 1 found almost nothing, which is why the owner saw answers like `hmm`
+ * and `um` to `i'm`.
+ *
+ * Word and Google Docs both answer `i'm` with `I'm`. So the cased form is
+ * considered at distance 0, which puts it first in the existing total order
+ * without a special case in the comparator.
+ */
+export function suggestionsFor(
+  word,
+  { common, all },
+  { limit = 5, personal, glossary, supplement, deepScan = true } = {},
+) {
+  const typed = String(word ?? "");
+  // Fold the typographic apostrophe for every comparison, exactly as
+  // `isKnownWord` does, and put the reader's own apostrophe back in what is
+  // SHOWN: offering `don't` for `don’t` would write a typewriter apostrophe
+  // into a document whose every other one is typographic.
+  const apostrophe = typed.includes(TYPOGRAPHIC_APOSTROPHE)
+    ? TYPOGRAPHIC_APOSTROPHE
+    : PLAIN_APOSTROPHE;
+  const lower = foldApostrophes(typed).toLowerCase();
+  if (!lower) return [];
+  /** The form to SHOW for a lower-case candidate, or null if nothing knows it.
+   *  The glossary is consulted so a mistyped product name suggests the product
+   *  name — `opendco` should offer `opendoc`, which is the first thing anyone
+   *  will try after the owner asked for the glossary at all. */
+  const canonical = (candidate) => {
+    if (all.has(candidate)) return candidate;
+    const title = candidate[0].toUpperCase() + candidate.slice(1);
+    if (all.has(title)) return title;
+    if (glossary?.has(candidate)) return candidate;
+    if (glossary?.has(title)) return title;
+    // An installed pack's words are offerable, which is most of what installing
+    // one is for: a reader who typed `microservics` should be offered
+    // `microservices` once the pack that knows the word is there, and before it
+    // is there the honest answer is that nothing close to it is known.
+    if (supplement?.has(candidate)) return candidate;
+    if (supplement?.has(title)) return title;
+    if (personal?.has(candidate)) return candidate;
+    return null;
+  };
+
+  /** lower-case candidate → { distance, shown } */
+  const scored = new Map();
+  const consider = (candidate, distance) => {
+    // The word is its own correction only when the fix is its CASE, which is
+    // what distance 0 means here; at any other distance it is the input and
+    // offering it back is noise.
+    if (candidate === lower && distance !== 0) return;
+    const existing = scored.get(candidate);
+    if (existing && existing.distance <= distance) return;
+    const shown = canonical(candidate);
+    if (!shown) return;
+    scored.set(candidate, { distance, shown });
+  };
+
+  // The capitalization-only fix, offered before any edit is generated. It is
+  // taken only when `canonical` found a form that differs from what was typed,
+  // so a word nothing knows gains no self-suggestion.
+  const casedSelf = canonical(lower);
+  if (casedSelf !== null && casedSelf !== foldApostrophes(typed)) consider(lower, 0);
+
+  for (const candidate of edits1(lower)) consider(candidate, 1);
+  // The commonest two-edit typo, a doubled letter missed or added twice, is
+  // generated directly: it is cheap, and it must not depend on stage 2 running
+  // (stage 2 is skipped once stage 1 finds three candidates).
+  for (const candidate of doublings2(lower)) consider(candidate, 2);
+
+  // `deepScan: false` keeps stage 1 and skips stage 2. It exists because
+  // suggestions now run inside the proofing worker while checking rather than
+  // on right-click (`docs/146` §4, ADR-042, and the correction in `docs/114`
+  // §5.4): off the main thread is not the same as unbounded, and this is the
+  // budget's lever. A caller that skips stage 2 must not then report "there are
+  // no suggestions" — it has not asked.
+  if (deepScan && scored.size < 3) {
+    // Two prefilters before the distance is computed at all, because they run
+    // 83,775 times and it runs a few thousand: the length must be within the
+    // bound, and a real typo almost never changes BOTH of the first two
+    // characters. `| 32` folds an ASCII/Latin-1 capital without allocating a
+    // lower-cased copy of every entry. Both filters can in principle reject a
+    // true distance-2 neighbour; that is the trade that keeps a right-click
+    // under a frame, and it is stated rather than hidden.
+    const head = lower.charCodeAt(0);
+    const second = lower.length > 1 ? lower.charCodeAt(1) : -1;
+    for (const entry of all) {
+      const delta = entry.length - lower.length;
+      if (delta > 2 || delta < -2) continue;
+      if (
+        (entry.charCodeAt(0) | 32) !== head &&
+        (entry.length > 1 ? entry.charCodeAt(1) | 32 : -1) !== second
+      )
+        continue;
+      const candidate = entry.toLowerCase();
+      const distance = boundedEditDistance(lower, candidate, 2);
+      if (distance <= 2) consider(candidate, distance);
+    }
+    for (const extra of [personal, glossary, supplement]) {
+      if (!extra) continue;
+      for (const entry of extra) {
+        const candidate = entry.toLowerCase();
+        const distance = boundedEditDistance(lower, candidate, 2);
+        if (distance <= 2) consider(candidate, distance);
+      }
+    }
+  }
+
+  // A two-letter answer to an eight-letter typo is noise, not a suggestion —
+  // Word suppresses these too.
+  if (lower.length >= 4) {
+    for (const [candidate] of scored) if (candidate.length < 3) scored.delete(candidate);
+  }
+
+  const isCommon = (candidate) =>
+    common.has(candidate) || common.has(candidate[0].toUpperCase() + candidate.slice(1));
+
+  // The rank (audit CRITIC-09): the weighted distance (above), plus a small
+  // penalty for a changed first letter (typists rarely get it wrong) and for a
+  // word outside the common tier (the frequency term: of two equally likely
+  // slips, the commoner word is the likelier intent). A capitalization-only fix
+  // (distance 0) still comes first. Then the old total order breaks ties.
+  const rank = new Map();
+  for (const [candidate, entry] of scored) {
+    rank.set(
+      candidate,
+      entry.distance === 0
+        ? -1
+        : weightedEditDistance(lower, candidate) +
+            (candidate[0] === lower[0] ? 0 : 0.3) +
+            (isCommon(candidate) ? 0 : 0.2),
+    );
+  }
+
+  return [...scored.entries()]
+    .sort(([wordA, a], [wordB, b]) => {
+      const rankA = rank.get(wordA);
+      const rankB = rank.get(wordB);
+      if (Math.abs(rankA - rankB) > 1e-9) return rankA - rankB;
+      if (a.distance !== b.distance) return a.distance - b.distance;
+      const headA = wordA[0] === lower[0];
+      const headB = wordB[0] === lower[0];
+      if (headA !== headB) return headA ? -1 : 1;
+      const commonA = isCommon(wordA);
+      const commonB = isCommon(wordB);
+      if (commonA !== commonB) return commonA ? -1 : 1;
+      const kindA = editKind(lower, wordA);
+      const kindB = editKind(lower, wordB);
+      if (kindA !== kindB) return kindA - kindB;
+      const lenA = Math.abs(wordA.length - lower.length);
+      const lenB = Math.abs(wordB.length - lower.length);
+      if (lenA !== lenB) return lenA - lenB;
+      return wordA < wordB ? -1 : 1;
+    })
+    .slice(0, limit)
+    .map(([, entry]) =>
+      matchCase(entry.shown, typed).replaceAll(PLAIN_APOSTROPHE, apostrophe),
+    );
+}
+
+// ---- The keystroke cadence ---------------------------------------------------
+
+/**
+ * The debounce between an edit and a re-check.
+ *
+ * Deliberately the same SHAPE as `DraftScheduler` in `drafts.mjs` — store a
+ * flag, clear a timer, set a timer — rather than a second cadence invented for
+ * this feature. `noteDirty()` is the ONLY thing the keystroke path calls, and
+ * it is O(1) in document size: it never looks at the document, the dictionary
+ * or the page window.
+ *
+ * Timers are injected, so `spelling.test.mjs` can prove the zero-scans-while-
+ * typing claim in node instead of asserting it in prose.
+ */
+export class SpellScheduler {
+  constructor({
+    check,
+    quiesceMs = 400,
+    setTimer = (fn, ms) => setTimeout(fn, ms),
+    clearTimer = (handle) => clearTimeout(handle),
+  }) {
+    this.check = check;
+    this.quiesceMs = quiesceMs;
+    this.setTimer = setTimer;
+    this.clearTimer = clearTimer;
+    this.handle = null;
+    this.dirty = false;
+  }
+
+  /** O(1). Called from the edit choke point, on every keystroke.
+   *
+   *  `quiesceMs` overrides the default for this one call — a scroll waits less
+   *  than an edit, because nothing is changing under the reader. It is an
+   *  argument rather than a second scheduler on purpose: two schedulers racing
+   *  over one check is two cadences to reason about and only one of them would
+   *  stay right. */
+  noteDirty(quiesceMs = this.quiesceMs) {
+    this.dirty = true;
+    if (this.handle !== null) this.clearTimer(this.handle);
+    this.handle = this.setTimer(() => {
+      this.handle = null;
+      this.dirty = false;
+      this.check();
+    }, quiesceMs);
+  }
+
+  /** Runs the pending check now (a scroll, a mode change, an explicit refresh). */
+  flush() {
+    if (this.handle !== null) this.clearTimer(this.handle);
+    this.handle = null;
+    this.dirty = false;
+    this.check();
+  }
+
+  cancel() {
+    if (this.handle !== null) this.clearTimer(this.handle);
+    this.handle = null;
+    this.dirty = false;
+  }
+}
+
+// ---- The per-paragraph cache -------------------------------------------------
+
+/**
+ * `nodeId → { text, misspellings }`, bounded.
+ *
+ * An entry is valid while `copyText` returns the same string, so scrolling back
+ * is free and an edit elsewhere in the document invalidates nothing. The bound
+ * is what stops a long session in a long document growing it without limit; the
+ * eviction is least-recently-used, which for a scroll-driven workload is
+ * "furthest from the window" (`docs/114` §5.2).
+ */
+export class ParagraphCache {
+  constructor(limit = 400) {
+    this.limit = limit;
+    this.entries = new Map();
+  }
+
+  /** The cached misspellings for `nodeId` if the text still matches, else null. */
+  get(nodeId, text) {
+    const entry = this.entries.get(nodeId);
+    if (!entry || entry.text !== text) return null;
+    // Re-insert so Map iteration order is least-recently-used first.
+    this.entries.delete(nodeId);
+    this.entries.set(nodeId, entry);
+    return entry.misspellings;
+  }
+
+  set(nodeId, text, misspellings) {
+    this.entries.delete(nodeId);
+    this.entries.set(nodeId, { text, misspellings });
+    while (this.entries.size > this.limit) {
+      const oldest = this.entries.keys().next().value;
+      this.entries.delete(oldest);
+    }
+  }
+
+  clear() {
+    this.entries.clear();
+  }
+
+  get size() {
+    return this.entries.size;
+  }
+}
