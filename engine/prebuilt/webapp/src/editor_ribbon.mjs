@@ -304,7 +304,8 @@ export function createRibbon(ed) {
    *  about whether work would be lost (docs/104 T-14: one dirty signal, one
    *  reader). */
   async function confirmDiscardIfEdited() {
-    if (!ed.documentIsDirty()) return true;
+    // A Ternleaf project saves every revision, so nothing can be lost here.
+    if (globalThis.ternleafProjectAttached || !ed.documentIsDirty()) return true;
     return confirmModal({
       title: "Discard unsaved changes?",
       message: `Opening another file replaces “${ed.currentName || "this document"}”. Your edits have not been saved and there is no copy of them anywhere else.`,

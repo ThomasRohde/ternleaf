@@ -731,7 +731,10 @@ export function createPalette(ed) {
     // id it already has instead of shipping ungated (`SKILL` §10: fix the pattern).
     // Then to the CONTAINER's grant for deciding a tracked change, which the host
     // contract has always required `edit` for (HF-199, `review_authority.mjs`).
-    return narrowDecisionsToContainer(ed.SESSION.narrow(cmds.filter((command) => ed.doc || command.noDoc)), ed.HOST_CAPS);
+    const offered = narrowDecisionsToContainer(ed.SESSION.narrow(cmds.filter((command) => ed.doc || command.noDoc)), ed.HOST_CAPS);
+    // A Ternleaf project owns open, new and save. It replaces those commands
+    // here, in the one registry that every surface reads.
+    return globalThis.ternleafCommands ? globalThis.ternleafCommands(offered, context) : offered;
   }
 
   return { cmdInput, cmdList, cmdPalette, editorCommands, searchTrigger };

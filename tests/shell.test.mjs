@@ -135,10 +135,10 @@ test("a canvas opens the configured document or a DOCX inside the project", () =
     // Without a configuration, the project's own engine and example are used.
     mkdirSync(join(project, "engine/prebuilt/webapp"), { recursive: true });
     mkdirSync(join(project, "examples"));
-    writeFileSync(join(project, "examples/harbour-library-brief.docx"), "docx");
+    writeFileSync(join(project, "examples/welcome-to-ternleaf.docx"), "docx");
     const first = resolveProject({ project });
     assert.equal(first.engine, join(project, "opendoc"));
-    assert.match(first.state, /[\\/]\.ternleaf[\\/]harbour-library-brief-[a-f0-9]{10}\.sqlite$/);
+    assert.match(first.state, /[\\/]\.ternleaf[\\/]welcome-to-ternleaf-[a-f0-9]{10}\.sqlite$/);
     writeFileSync(join(project, ".ternleaf/canvas.json"),
       JSON.stringify({ source: "docs/brief.docx", state: ".ternleaf/brief.sqlite" }));
     const main = resolveProject({ project });

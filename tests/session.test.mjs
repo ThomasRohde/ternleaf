@@ -21,6 +21,12 @@ test("DOCX export refuses omitted source constructs and permits reported bookkee
   ])), /would lose unsupported source data/);
   assert.throws(() => validateDocxExport(report([entry("unknown-property", "not_retained")])),
     /unknown-property/);
+  // The author can accept a known, small loss. Nothing else can be accepted.
+  const legacy = "docx.export.stale.styles_with_effects";
+  assert.equal(validateDocxExport(report([entry(legacy, "not_retained")]), new Set([legacy])).length, 1);
+  assert.throws(() => validateDocxExport(report([entry("unknown-property", "not_retained")]),
+    new Set(["unknown-property"])), error => error.decidable === false);
+  assert.throws(() => validateDocxExport(report([entry(legacy, "not_retained")])), error => error.decidable === true);
 });
 
 function request(id, expected, command, extra = {}) {

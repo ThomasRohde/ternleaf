@@ -17,11 +17,13 @@ GitHub Copilot app
 
 **Extension.** [`extension.mjs`](../.github/extensions/ternleaf/extension.mjs) joins the Copilot session, declares the canvas and its four actions, and starts one host for each canvas instance. It sends a short prompt to the chat when the author makes a request, and it turns a refusal from the store into an instruction that the agent can act on. It contains no document logic.
 
-**Host.** [`serve.mjs`](../apps/host/serve.mjs) is an HTTP server on `127.0.0.1` with a random port. It serves the engine and the shell, and it exposes the session store to the editor. Every API call needs the bearer token of that canvas, and the host checks the `Host` and `Origin` headers. [`project.mjs`](../apps/host/project.mjs) decides which document, project file, engine and fonts a canvas uses.
+**Host.** [`serve.mjs`](../apps/host/serve.mjs) is an HTTP server on `127.0.0.1`. It serves the engine and the shell, and it exposes the session store to the editor. Every API call needs the bearer token of that canvas, which is new for each canvas, and the host checks the `Host` and `Origin` headers. The host asks for the same port for a project each time, so the editor keeps one origin and with it the author's settings. If that port is taken, any free port works.
+
+**Workspace.** [`project.mjs`](../apps/host/project.mjs) knows the documents of the project folder. It finds the `.docx` files, maps each one to its project file in `.ternleaf/`, remembers which document was open last, and writes a new or added document without ever replacing a file.
 
 **Session store.** [`store.mjs`](../packages/session/store.mjs) is the authority for saved state. One SQLite file per document holds the source bytes, the journal of revisions, the requests and the suggestions.
 
-**Editor.** The [OpenDoc](https://github.com/CasualOffice/opendoc) engine lays out and edits the document in the webview. The Ternleaf shell in [`apps/editor`](../apps/editor) adds the Review pane, the selection bubble and the launcher. [`editor.mjs`](../apps/editor/editor.mjs) holds the behaviour, [`shell.mjs`](../apps/editor/shell.mjs) the markup and [`editor.css`](../apps/editor/editor.css) the styles.
+**Editor.** The [OpenDoc](https://github.com/CasualOffice/opendoc) engine lays out and edits the document in the webview. The Ternleaf shell in [`apps/editor`](../apps/editor) adds the Review pane, the selection bubble, the launcher and the document windows. [`editor.mjs`](../apps/editor/editor.mjs) holds the behaviour, [`documents.mjs`](../apps/editor/documents.mjs) the Open and New windows, [`shell.mjs`](../apps/editor/shell.mjs) the markup and [`editor.css`](../apps/editor/editor.css) the styles.
 
 ## One writer, one journal
 
@@ -31,6 +33,14 @@ The engine instance in the open canvas is the only thing that edits a document. 
 - **Admission.** The engine patch calls the editor before it publishes a revision. The editor posts the engine's forward and inverse operations to the host in one synchronous request. The host writes the frame, the edition note and a receipt in one SQLite transaction, and checks the lease and the expected revision. If the host refuses, the engine rolls the edit back. Typing, toolbar commands, undo and redo all take this path.
 - **Replay.** A canvas that opens a project loads the source bytes and replays the journal. The source is never changed.
 - **Receipts.** Each publication has an operation ID. A repeated request with the same ID returns the first receipt and changes nothing. A request that was accepted, then undone, is therefore not applied a second time.
+
+## One canvas, many documents
+
+A host holds one open document at a time. When the author opens another document, makes a new one or adds a file, the host closes the first project file, opens the second and counts one document further. The editor sends that count with every call. A page that still shows the earlier document gets the answer "document-changed" and reloads, so it can never write into the wrong journal. The same happens when Copilot opens a document in a canvas that is already open.
+
+The engine patch gives the shell two hooks for this. The editor's command registry passes through `ternleafCommands`, where Open, New, Save, Version history and the Word export become Ternleaf's own. Every path that would replace the document on screen, such as a template, a picked file or a dropped file, ends in `ternleafOpen`, which turns the bytes into a new document of the project.
+
+A `.docx` that changed on disk no longer matches its project file. The host refuses to open it until the author agrees to start a new history. The earlier project file then moves to `.ternleaf/archive`.
 
 ## From request to revision
 
@@ -59,4 +69,10 @@ No action applies an edit, reads the document without a request, or reaches the 
 
 ## Export
 
-**Export DOCX** asks the engine for a DOCX with its retention report. [`export-policy.mjs`](../apps/editor/export-policy.mjs) refuses the export if the report lists source content that would be lost. Session bookkeeping that Word rewrites anyway, such as revision save IDs, statistics and the thumbnail, is allowed. An unchanged document exports byte for byte.
+**Export DOCX** asks the engine for a DOCX with its retention report. [`export-policy.mjs`](../apps/editor/export-policy.mjs) sorts what the report says was not kept into three kinds:
+
+- **Bookkeeping** that Word writes again on its next save, such as revision save IDs, statistics and the thumbnail. The export goes ahead.
+- **A known, small loss.** Today that is one part: the second copy of the styles that Word 2010 wrote (`stylesWithEffects.xml`). Ternleaf explains the loss and exports only after the author agrees.
+- **Anything else.** The export is refused.
+
+An unchanged document exports byte for byte. PDF, Markdown, web page and plain text are conversions, so they are not checked this way.

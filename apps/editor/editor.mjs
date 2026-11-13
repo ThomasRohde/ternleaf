@@ -1,10 +1,12 @@
 import { open as openDoc } from "/pkg/casual_doc_wasm.js";
-import { validateDocxExport } from "./export-policy.mjs";
+import { authorDecides, validateDocxExport } from "./export-policy.mjs";
 import { reviewChange } from "./review-change.mjs";
 import { forAuthor } from "./messages.mjs";
 import { captureWordEvidence } from "./word-evidence.mjs";
 import { wordCount, wordDiff } from "./diff.mjs";
 import { documentActions, layout, quickActions } from "./shell.mjs";
+import { confirmDialog, createDocuments } from "./documents.mjs";
+import { ago } from "./time.mjs";
 
 const format = "org.openxmlformats.wordprocessingml.document";
 const headers = token => ({ Authorization: "Bearer " + token, "Content-Type": "application/json" });
@@ -23,10 +25,10 @@ export function attachTernleaf(editor) {
   stylesheet.href = "/ternleaf/editor.css";
   document.head.append(stylesheet);
   for (const link of document.querySelectorAll('link[rel~="icon"]')) link.href = "/ternleaf/mark.svg";
-  const { panel, launcher, bubble } = layout();
+  const { panel, launcher, bubble, toaster, start: startCard } = layout();
   const workarea = document.querySelector(".workarea") ?? document.body;
-  workarea.append(panel, launcher);
-  document.body.append(bubble);
+  workarea.append(panel, launcher, startCard);
+  document.body.append(bubble, toaster);
 
   const part = name => panel.querySelector(`[data-part="${name}"]`);
   const button = action => panel.querySelector(`[data-action="${action}"]`);
@@ -35,7 +37,14 @@ export function attachTernleaf(editor) {
   const prompt = panel.querySelector('[data-field="prompt"]');
   const review = part("proposal");
   const diagnostics = panel.querySelector("output");
-  const message = (text, tone = "") => { status.textContent = text; status.dataset.tone = tone; };
+  const startStatus = startCard.querySelector('[data-part="start-status"]');
+  const message = (text, tone = "") => {
+    status.textContent = text;
+    status.dataset.tone = tone;
+    if (startCard.hidden) return;
+    startStatus.textContent = text;
+    startStatus.dataset.tone = tone;
+  };
 
   // ---- Session state ----------------------------------------------------
   let lease, source, fonts, fontHash, proposal, pending, heartbeat, poll, draft, accepted;
@@ -59,6 +68,18 @@ export function attachTernleaf(editor) {
   const admissionMs = [];
   const leaseKey = "ternleaf-lease";
   let blocked = false;
+  let epoch;                // The host's count of documents, from the claim.
+
+  // A short notice at the bottom of the canvas. It goes away by itself.
+  let toastTimer;
+  function toast(text, tone = "") {
+    toaster.textContent = text;
+    toaster.dataset.tone = tone;
+    toaster.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toaster.hidden = true; }, tone === "problem" ? 9000 : 4500);
+  }
+  const reload = () => location.reload();
 
   const updateDiagnostics = () => {
     const last = admissionMs.at(-1);
@@ -69,19 +90,24 @@ export function attachTernleaf(editor) {
   const report = error => {
     button("reload").hidden = !blocked;
     panel.dataset.blocked = String(blocked);
-    if (blocked) setOpen(true);
+    if (blocked) { setOpen(true); paintPill(); }
     message(error.message ?? String(error), "problem");
   };
+  const sent = () => ({ ...headers(token), ...(epoch === undefined ? {} : { "X-Ternleaf-Epoch": String(epoch) }) });
+  // The host answers "document-changed" when the canvas was told to show
+  // another document. The page then loads that document.
+  const moved = code => { if (code === "document-changed") { reload(); return true; } return false; };
 
   function postSync(path, data) {
     const req = new XMLHttpRequest();
     req.open("POST", "/api/" + path, false);
-    for (const [key, value] of Object.entries(headers(token))) req.setRequestHeader(key, value);
+    for (const [key, value] of Object.entries(sent())) req.setRequestHeader(key, value);
     try { req.send(JSON.stringify(data)); }
     catch { blocked = true; throw new Error("Connection lost. Reload to recover the last saved revision."); }
     if (req.status !== 200) {
       if (req.status >= 500 || req.status === 0) blocked = true;
       const code = JSON.parse(req.responseText || "{}").error;
+      moved(code);
       throw new Error(code ? forAuthor(code) : "Publication uncertain. Reload to recover.");
     }
     try { return JSON.parse(req.responseText); }
@@ -89,11 +115,24 @@ export function attachTernleaf(editor) {
   }
 
   async function call(path, data) {
-    const response = await fetch("/api/" + path, { method: "POST", headers: headers(token), body: JSON.stringify(data) });
+    const response = await fetch("/api/" + path, { method: "POST", headers: sent(), body: JSON.stringify(data) });
     const value = await response.json();
-    if (!response.ok) throw Object.assign(new Error(forAuthor(value.error)), { code: value.error });
+    if (!response.ok) {
+      moved(value.error);
+      throw Object.assign(new Error(value.message ?? forAuthor(value.error)), { code: value.error });
+    }
     return value;
   }
+  // Send a file's bytes. The name travels in a header, not in the address.
+  async function upload(path, bytes, fileName) {
+    const response = await fetch("/api/" + path, { method: "POST", body: bytes,
+      headers: { Authorization: "Bearer " + token, "Content-Type": "application/octet-stream",
+        "X-Ternleaf-Name": encodeURIComponent(fileName) } });
+    const value = await response.json();
+    if (!response.ok) throw Object.assign(new Error(value.message ?? forAuthor(value.error)), { code: value.error });
+    return value;
+  }
+  const documents = createDocuments({ api: call, upload, toast, reload });
 
   function renderState(record) {
     if (record.editorial.before?.note !== record.editorial.after?.note) {
@@ -138,25 +177,87 @@ export function attachTernleaf(editor) {
       return true;
     } catch (error) { updateDiagnostics(); report(error); return false; }
   };
+  // A Word file must keep what the source had, so its export is checked. The
+  // other formats are conversions, and nobody expects them to carry it all.
+  const acceptedLosses = new Set();  // Known losses that the author accepted for this document.
   window.ternleafValidateExport = (targetFormat, exportReport) => {
-    if (targetFormat !== format) throw new Error("This project supports DOCX export");
-    return validateDocxExport(exportReport);
+    if (!/wordprocessingml/.test(targetFormat)) return [];
+    try { return validateDocxExport(exportReport, acceptedLosses); }
+    catch (error) {
+      if (error.decidable) throw new Error("this export leaves out a legacy part. Use Export DOCX in the Ternleaf pane, which asks you about it");
+      throw error;
+    }
   };
+
+  // ---- The editor's own commands ------------------------------------------
+  // The engine asks here before it replaces the document on screen.
+  globalThis.ternleafOpen = (content, fileName) => documents.receive(content, fileName);
+  const leaveFilePage = () => {
+    const back = document.querySelector("#filePageBack");
+    if (back && back.offsetParent) back.click();
+  };
+  const everySaved = () => toast(blocked ? "This canvas cannot save. Reload it to get the last saved revision."
+    : `Saved at revision ${journal.length}. Ternleaf saves every change.`, blocked ? "problem" : "ok");
+  const replaced = {
+    "file.open": () => void documents.open(),
+    "file.new": () => void documents.create(),
+    "file.save": everySaved,
+    "file.export.docx": () => { leaveFilePage(); void act("export"); },
+    "file.versionHistory": () => { leaveFilePage(); setOpen(true); showView("history"); panel.focus({ preventScroll: true }); },
+  };
+  globalThis.ternleafCommands = commands => commands.map(command => replaced[command.id]
+    ? { ...command, enabled: true, disabledReason: undefined, run: replaced[command.id],
+      ...(command.id === "file.new" ? { label: "New document…" } : {}) }
+    : command);
+
+  // The editor's state pill says "Edited" until a download. In a Ternleaf
+  // project every revision is saved at once, so the pill says that.
+  const pill = document.querySelector("#documentState");
+  function paintPill() {
+    const label = pill?.querySelector("#documentStateText");
+    const symbol = pill?.querySelector(".ms");
+    if (!label || !symbol || !lease) return;
+    const [text, glyph] = blocked ? ["Not saved", "error"] : ["Saved", "check_circle"];
+    if (label.textContent !== text) label.textContent = text;
+    if (symbol.textContent !== glyph) symbol.textContent = glyph;
+    if (pill.dataset.state !== "opened") pill.dataset.state = "opened";
+    pill.title = blocked ? "Reload the canvas to get the last saved revision." : "Ternleaf saves every change as a revision.";
+  }
+  if (pill) new MutationObserver(paintPill).observe(pill, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["data-state"] });
 
   async function start() {
     await new Promise(resolve => {
       const check = () => document.querySelector("#file")?.disabled ? setTimeout(check, 50) : resolve();
       check();
     });
-    const state = await call("claim", { previous: JSON.parse(sessionStorage.getItem(leaseKey) ?? "null") });
+    // The spelling checker does not know the product's name.
+    try {
+      const words = await (await import("/src/drafts.mjs")).openWordStore({});
+      await words?.add("Ternleaf");
+    } catch { /* A personal dictionary is a convenience. */ }
+    // Another canvas can hold the document for a few seconds after it closes.
+    // Wait for it instead of failing.
+    let state;
+    for (;;) {
+      try { state = await call("claim", { previous: JSON.parse(sessionStorage.getItem(leaseKey) ?? "null") }); break; }
+      catch (error) {
+        if (error.code !== "writer-active") throw error;
+        startCard.querySelector('[data-part="start-other"]').hidden = false;
+        message("This document is open in another Ternleaf canvas. This canvas opens it when the other one closes.", "problem");
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
+    message("Opening the document…");
     lease = state.lease;
+    epoch = state.epoch;
+    panel.dataset.workspace = String(state.workspace !== false);
     sessionStorage.setItem(leaseKey, JSON.stringify(lease));
     fontHash = state.fontHash;
     captureWordComparison = state.captureWordComparison;
     journal = state.journal;
     reviewed = state.accepted ?? [];
     name = state.name ?? name;
-    part("name").textContent = name;
+    part("name").textContent = startCard.querySelector('[data-part="start-name"]').textContent = name;
     part("name").title = name;
     const [input, ...faces] = await Promise.all([
       fetch("/api/source", { headers: headers(token) }),
@@ -169,17 +270,20 @@ export function attachTernleaf(editor) {
     fonts = await Promise.all(faces.map(async face => new Uint8Array(await face.arrayBuffer())));
     await editor.open(source, name);
     const doc = editor.doc;
-    if (!doc) throw new Error("OpenDoc could not open the source");
+    if (!doc) throw new Error("Ternleaf could not read this document. The file may be damaged, or it is not a Word document.");
     for (const font of fonts) doc.registerFont(font);
     for (const record of journal) doc.replayDurableFrame(JSON.stringify(record.frame));
     await editor.renderAll();
     doc.enableDurableAdmission();
     globalThis.ternleafProjectAttached = true;
-    document.querySelector("#file").disabled = true;
+    paintPill();
+    void call("opened", { lease }).catch(() => {});
     note.value = state.editorial?.note ?? "";
     updateDiagnostics();
     ready();
     panel.dataset.ready = "true";
+    startCard.hidden = true;
+    startStatus.textContent = "";
     await syncReviews(state.reviews, true);
     syncBatch(state.suggestions ?? { batch: null, suggestions: [] }, true);
     if (draft || batch) setOpen(true);
@@ -423,6 +527,11 @@ export function attachTernleaf(editor) {
       throw new Error("The proposal is stale");
     }
     if (pending) throw new Error("Another edit is being accepted");
+    // In Suggesting mode the engine records an edit as a tracked change. That
+    // is not the reviewed change, so the store would refuse it.
+    if (editor.doc.trackRevisions) {
+      throw new Error("Switch from Suggesting to Editing to accept a proposal. Ternleaf keeps each accepted change as a revision.");
+    }
     await call("review-note", { lease, id, note: authoredNote });
     if (pending || revision !== journal.length) throw new Error("The proposal is stale");
     const change = reviewChange(candidate);
@@ -752,20 +861,6 @@ export function attachTernleaf(editor) {
     signature = "";
   }
 
-  const ago = at => {
-    const seconds = Math.round((Date.now() - at) / 1000);
-    if (seconds < 60) return "just now";
-    const steps = [[60, "minute"], [60, "hour"], [24, "day"]];
-    let value = seconds;
-    let unit = "second";
-    for (const [size, nameOfUnit] of steps) {
-      if (value < size) break;
-      value = Math.floor(value / size);
-      unit = nameOfUnit;
-    }
-    return new Intl.RelativeTimeFormat("en", { numeric: "auto" }).format(-value, unit);
-  };
-
   function renderHistory() {
     const list = part("history");
     const byRevision = new Map(reviewed.map(entry => [entry.revision, entry]));
@@ -823,7 +918,7 @@ export function attachTernleaf(editor) {
     if (panel.dataset.open !== String(open)) {
       panel.dataset.open = String(open);
       launcher.hidden = open;
-      try { sessionStorage.setItem(openKey, String(open)); } catch { /* Storage can be unavailable. */ }
+      try { localStorage.setItem(openKey, String(open)); } catch { /* Storage can be unavailable. */ }
       window.dispatchEvent(new Event("resize"));
     }
     if (open && focus) {
@@ -851,12 +946,17 @@ export function attachTernleaf(editor) {
   fit();
   new ResizeObserver(() => { fit(); signature = ""; }).observe(document.documentElement);
   let stored = null;
-  try { stored = sessionStorage.getItem(openKey); } catch { /* Use the default. */ }
+  try { stored = localStorage.getItem(openKey); } catch { /* Use the default. */ }
   setOpen(stored === null ? !narrow() : stored === "true");
   showView("review");
   // The compact toolbar leaves more room for the page in a narrow canvas.
-  if (narrow() && document.documentElement.dataset.chrome === "ribbon") {
+  // An author who chose a toolbar keeps that choice.
+  let chosen = null;
+  try { chosen = localStorage.getItem("opendoc.chromeMode"); } catch { /* Use the default. */ }
+  if (!chosen && narrow() && document.documentElement.dataset.chrome === "ribbon") {
     document.querySelector('[data-chrome-mode="compact"]')?.click();
+    // This was Ternleaf's choice for a narrow canvas, not the author's.
+    try { localStorage.removeItem("opendoc.chromeMode"); } catch { /* Nothing to undo. */ }
   }
 
   function downloadFile(content, type, fileName) {
@@ -876,12 +976,22 @@ export function attachTernleaf(editor) {
     }
     const output = doc.exportAs(format, journal.length ? "preserve_when_safe" : "exact_if_unchanged");
     try {
-      const findings = validateDocxExport(output.reportJson);
+      try { validateDocxExport(output.reportJson, acceptedLosses); }
+      catch (error) {
+        if (!error.decidable) {
+          throw new Error(`Ternleaf cannot export this document as DOCX yet. The export would lose content that the engine does not keep (${error.features.join(", ")}). Your revisions are saved, and PDF export still works.`);
+        }
+        // A known, small loss. The author decides, once for this document.
+        const agreed = await confirmDialog({ title: "Export without a legacy part?",
+          paragraphs: error.features.map(feature => authorDecides.get(feature)), yes: "Export DOCX" });
+        if (!agreed) { ready(); return; }
+        for (const feature of error.features) acceptedLosses.add(feature);
+        validateDocxExport(output.reportJson, acceptedLosses);
+      }
       const content = output.bytes;
       const stem = name.replace(/\.docx$/i, "");
       downloadFile(content, output.mimeType, journal.length ? `${stem}-r${journal.length}.docx` : `${stem}.docx`);
-      message(findings.length ? `Exported revision ${journal.length} with ${findings.length} bookkeeping findings`
-        : `Exported revision ${journal.length}`, "ok");
+      message(`Exported revision ${journal.length} as a Word file`, "ok");
       if (captureWordComparison) {
         wordEvidence = await captureWordEvidence(doc, content, journal.length);
         button("word-evidence").hidden = false;
@@ -901,6 +1011,18 @@ export function attachTernleaf(editor) {
     if (action === "close") { setOpen(false); return; }
     if (action === "open") { setOpen(true, true); return; }
     if (action === "tab") { showView(target.dataset.view); return; }
+    if (action === "documents") { void documents.open(); return; }
+    if (action === "export-menu" || action === "export-as") {
+      const menu = part("export-menu");
+      const open = action === "export-menu" && menu.hidden;
+      menu.hidden = !open;
+      button("export-menu").setAttribute("aria-expanded", String(open));
+      if (action === "export-as" && lease && !blocked) {
+        const result = await window.opendoc?.execute?.(target.dataset.command);
+        if (result && result.ok === false) toast("That format is not available here.", "problem");
+      }
+      return;
+    }
     if (!lease || blocked) return;
     try {
       switch (action) {
@@ -1017,19 +1139,32 @@ export function attachTernleaf(editor) {
       }
     } catch (error) { if (!blocked) { report(error); render(); } }
   };
-  for (const surface of [panel, launcher, bubble]) {
+  for (const surface of [panel, launcher, bubble, startCard]) {
     surface.addEventListener("click", event => {
       const target = event.target.closest("[data-action]");
       if (target && !target.disabled) void act(target.dataset.action, target);
     });
   }
+  // A click elsewhere, or Escape, closes the export menu.
+  const closeExportMenu = () => {
+    if (part("export-menu").hidden) return;
+    part("export-menu").hidden = true;
+    button("export-menu").setAttribute("aria-expanded", "false");
+  };
+  document.addEventListener("pointerdown", event => { if (!event.target.closest?.(".tl-export")) closeExportMenu(); });
+  panel.addEventListener("keydown", event => { if (event.key === "Escape") closeExportMenu(); });
+
   // A click on the bubble must not move the focus out of the document, or
   // the selection that the bubble belongs to could collapse.
   bubble.addEventListener("pointerdown", event => event.preventDefault());
   bubble.addEventListener("mousedown", event => event.preventDefault());
-  prompt.addEventListener("input", renderCompose);
+  // Read the selection at once. The watch interval can be a moment behind
+  // an author who selects and types quickly.
+  prompt.addEventListener("focus", () => { watchSelection(); renderCompose(); });
+  prompt.addEventListener("input", () => { watchSelection(); renderCompose(); });
   note.addEventListener("input", () => { if (draft) button("save-note").hidden = note.value === draft.note; });
   prompt.addEventListener("keydown", event => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) watchSelection();
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !button("request").disabled) {
       event.preventDefault();
       void act("request", button("request"));
@@ -1047,6 +1182,12 @@ export function attachTernleaf(editor) {
     panel.querySelector(`[role=tab][data-view="${next}"]`).focus();
   });
   window.addEventListener("keydown", event => {
+    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.code === "KeyO") {
+      event.preventDefault();
+      event.stopPropagation();
+      void documents.open();
+      return;
+    }
     if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.code === "Space") {
       event.preventDefault();
       event.stopPropagation();
@@ -1086,6 +1227,7 @@ export function attachTernleaf(editor) {
   });
   start().catch(error => {
     blocked = true;
+    for (const control of startCard.querySelectorAll("button")) control.hidden = false;
     report(error);
     if (lease) void call("release", { lease }).catch(() => {});
   });

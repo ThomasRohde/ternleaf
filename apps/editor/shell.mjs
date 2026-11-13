@@ -39,15 +39,18 @@ const chips = ids => quickActions.filter(item => !ids || ids.includes(item.id)).
 export function layout() {
   const panel = document.createElement("aside");
   panel.id = "ternleaf-panel";
-  panel.className = "side-panel tl-pane";
+  // Not a "side-panel": the editor's dock manager shows one of those at a
+  // time, and the Review pane must stay when an editor panel opens.
+  panel.className = "tl-pane";
   panel.tabIndex = -1;
   panel.setAttribute("aria-label", "Ternleaf");
   panel.innerHTML = `
     <header class="tl-head">
       ${icon.mark}
       <div class="tl-title">
-        <h2 data-part="name">Ternleaf</h2>
-        <p role="status">Opening the project…</p>
+        <h2><button type="button" class="tl-name" data-action="documents" title="Open another document (Ctrl+O)">
+          <span data-part="name">Ternleaf</span><span class="ms" aria-hidden="true">expand_more</span></button></h2>
+        <p role="status">Opening the document…</p>
       </div>
       <button type="button" class="tl-icon" data-action="close" aria-label="Close Ternleaf pane" title="Close">${icon.close}</button>
     </header>
@@ -158,9 +161,19 @@ export function layout() {
       </section>
     </div>
     <footer class="tl-foot">
-      <button type="button" class="tl-button" data-action="export">${icon.download}<span>Export DOCX</span></button>
+      <div class="tl-export">
+        <button type="button" class="tl-button" data-action="export" title="Download the current revision as a Word file">${icon.download}<span>Export DOCX</span></button>
+        <button type="button" class="tl-button" data-action="export-menu" aria-haspopup="menu" aria-expanded="false"
+          aria-label="Export in another format" title="Export in another format"><span class="ms" aria-hidden="true">expand_less</span></button>
+        <div class="tl-menu" role="menu" data-part="export-menu" hidden>
+          <button type="button" role="menuitem" data-action="export-as" data-command="file.export.pdf">PDF</button>
+          <button type="button" role="menuitem" data-action="export-as" data-command="file.export.markdown">Markdown</button>
+          <button type="button" role="menuitem" data-action="export-as" data-command="file.export.html">Web page</button>
+          <button type="button" role="menuitem" data-action="export-as" data-command="file.export.text">Plain text</button>
+        </div>
+      </div>
       <button type="button" class="tl-link" data-action="word-evidence" hidden>Download Word comparison data</button>
-      <details><summary>Save details</summary><output></output></details>
+      <details><summary>Details</summary><output></output></details>
     </footer>`;
 
   const launcher = document.createElement("button");
@@ -179,5 +192,21 @@ export function layout() {
   bubble.innerHTML = `<button type="button" class="tl-bubble-main" data-action="compose"
       title="Write an instruction (Ctrl+Shift+Space)">${icon.markMono}<span>Ask Copilot</span></button>
     ${chips(["shorten", "clarify", "proofread"])}`;
-  return { panel, launcher, bubble };
+  // What the canvas shows until the document is open: the name, what is
+  // happening and, after a failure, the ways out.
+  const start = document.createElement("div");
+  start.id = "ternleaf-start";
+  start.innerHTML = `<div class="tl-start-card">${icon.mark}
+    <h2 data-part="start-name">Ternleaf</h2>
+    <p data-part="start-status" role="status">Opening the document…</p>
+    <div class="tl-actions">
+      <button type="button" class="tl-button tl-primary" data-action="reload" data-part="start-reload" hidden>Try again</button>
+      <button type="button" class="tl-button" data-action="documents" data-part="start-other" hidden>Open another document</button>
+    </div></div>`;
+
+  const toaster = document.createElement("div");
+  toaster.id = "ternleaf-toast";
+  toaster.hidden = true;
+  toaster.setAttribute("role", "status");
+  return { panel, launcher, bubble, toaster, start };
 }

@@ -25,7 +25,7 @@ Its main limit is the preservation of source XML that it does not model. Ternlea
 The patch does these things:
 
 - **Admission.** The engine calls the host page before it publishes a revision and rolls the edit back on refusal. It can replay a saved frame when a project opens.
-- **Editor hooks.** The editor exposes its document, selection and refresh functions to the Ternleaf shell, blocks opening a second file in a project, and sends its save path through the Ternleaf export check.
+- **Editor hooks.** The editor exposes its document, selection and refresh functions to the Ternleaf shell and sends its save path through the Ternleaf export check. Its command registry passes through a Ternleaf hook, and every path that would replace the open document hands the bytes to Ternleaf instead. In a project, the editor does not ask about unsaved changes, because every revision is saved.
 - **Paragraph identity.** Word paragraph IDs (`w14:paraId`) have one owner through split, join, move and undo. Text version IDs (`w14:textId`) follow their paragraph.
 - **Source retention.** A bounded extension property and the `w:noProof` override survive on their runs.
 - **Layout.** Text baselines in exact-height lines match Word, and an inline chart shares the baseline of the text around it.
@@ -35,15 +35,17 @@ Keep the patch small. Every hunk is a cost at the next OpenDoc update.
 
 ## The prebuilt engine
 
-`engine/prebuilt/webapp` is the output of the build below, so that a clone runs without a Rust toolchain. [`engine/prebuilt/BUILD.json`](../engine/prebuilt/BUILD.json) records the OpenDoc commit, the hash of the patch and the hash of the WebAssembly module.
+`engine/prebuilt/webapp` is the output of the build below, so that a clone runs without a Rust toolchain. [`engine/prebuilt/BUILD.json`](../engine/prebuilt/BUILD.json) records the OpenDoc commit, the hash of the patch, the hash of the WebAssembly module and the build profile.
 
-The WebAssembly module is stored as `casual_doc_wasm_bg.wasm.gz`. The host serves it with `Content-Encoding: gzip` and the browser inflates it. The uncompressed module is larger than the file size limit of GitHub.
+It is the optimized build: the release profile with OpenDoc's own size settings, then `wasm-opt -Oz`. OpenDoc keeps full speed optimization for the crates that decide editing speed, such as layout and rendering. The module is 28.7 MB. An unoptimized development build is 118 MB.
+
+The WebAssembly module is stored as `casual_doc_wasm_bg.wasm.gz` (12.9 MB) to keep the repository small. The host serves it with `Content-Encoding: gzip` and the browser inflates it.
 
 `engine/prebuilt/notices` holds OpenDoc's licence and notice, the font licences, the Cargo lockfile, the licence texts of the Rust crates in the build, the Rust standard library notices and the patch.
 
 ## Build the engine
 
-You need Windows, Git, Rust 1.97.1 with the `wasm32-unknown-unknown` target, and [wasm-bindgen 0.2.129](https://github.com/wasm-bindgen/wasm-bindgen/releases/tag/0.2.129).
+You need Git, Rust 1.97.1 with the `wasm32-unknown-unknown` target, [wasm-bindgen 0.2.129](https://github.com/wasm-bindgen/wasm-bindgen/releases/tag/0.2.129) and `wasm-opt` from [Binaryen](https://github.com/WebAssembly/binaryen/releases). The script is PowerShell. The same commands work on any system with these tools.
 
 ```powershell
 rustup toolchain install 1.97.1 --profile minimal
@@ -51,10 +53,13 @@ rustup target add --toolchain 1.97.1 wasm32-unknown-unknown
 
 $engine = Join-Path $PWD '.build/opendoc'
 $bindgen = 'C:/path/to/wasm-bindgen.exe'
-& scripts/build-engine.ps1 -Checkout $engine -WasmBindgen $bindgen -NativeTests
+$wasmopt = 'C:/path/to/wasm-opt.exe'
+& scripts/build-engine.ps1 -Checkout $engine -WasmBindgen $bindgen -WasmOpt $wasmopt -NativeTests
 ```
 
-The script fetches the pinned commit, applies the patch, builds the WebAssembly module and, with `-NativeTests`, runs the engine's native tests. The web application is in `.build/opendoc/webapp`.
+The script fetches the pinned commit, applies the patch, builds the WebAssembly module in the release profile, runs `wasm-opt` on it and, with `-NativeTests`, runs the engine's native tests. The web application is in `.build/opendoc/webapp`.
+
+For work on the engine itself, add `-Dev`. That build is fast to make, large and slow to run. Do not use it as the prebuilt engine.
 
 To try a new build, point `engine` in `.ternleaf/canvas.json` at that folder. To make it the prebuilt engine, run:
 

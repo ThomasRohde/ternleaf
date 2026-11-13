@@ -33,6 +33,12 @@ Choose **Whole document** and a review such as **Proofread** or **Check consiste
 
 ![The Review pane lists three suggestions from a whole-document proofread](docs/assets/screenshots/document-review.png)
 
+### Open, create and add documents
+
+Press Ctrl+O, or choose **File → Open**, to see the Word documents in the project folder. Start a new document from a blank page, a letter, a report or meeting notes, or add a copy of a file from your computer. Each document keeps its own history, and a new canvas returns to the document that you had open last.
+
+![The Open a document window lists the Word documents in the project folder](docs/assets/screenshots/open-document.png)
+
 ### Keep a history
 
 Every edit and every accepted proposal is a saved revision. The History tab shows what you asked, what changed and your note.
@@ -60,7 +66,7 @@ GitHub Copilot app
 ```
 
 - **The editor** is [OpenDoc](https://github.com/CasualOffice/opendoc), a Rust/WebAssembly document engine, with a maintained [patch](engine/opendoc.patch). It runs in the canvas. Ternleaf adds the review pane, the selection bubble and the launcher.
-- **The host** is a small Node server on the loopback interface. It serves the editor, holds the document's SQLite project file and publishes each revision in one transaction.
+- **The host** is a small Node server on the loopback interface. It serves the editor, knows the documents of the project folder, holds the open document's SQLite project file and publishes each revision in one transaction.
 - **The extension** registers the canvas and four actions with Copilot. When you send a request, it posts a short prompt to your chat session. Copilot reads what you shared through `ternleaf_read` and answers through the other actions.
 
 | Action | What Copilot can do with it |
@@ -81,20 +87,21 @@ No action can edit the document.
 
 ## Get started
 
-You need the GitHub Copilot desktop app with canvas extensions.
+You need the GitHub Copilot desktop app with canvas extensions, and Git. The repository includes a prebuilt engine, so there is nothing to build.
 
-1. Choose **+ → Canvas → Import canvas from repo** and enter the repository URL.
-2. Start a session in the imported folder.
+1. Clone this repository.
+2. Open the folder in the Copilot app and start a session.
 3. Choose **+ → Canvas → Ternleaf**, or ask Copilot to "open the Ternleaf canvas".
 
-Or clone the repository and open the folder in the app instead of importing.
+The canvas opens [`examples/welcome-to-ternleaf.docx`](examples/welcome-to-ternleaf.docx), a short introduction with two exercises. [`examples/harbour-library-brief.docx`](examples/harbour-library-brief.docx) is the document in the pictures above.
 
-The canvas opens the example document, [`examples/harbour-library-brief.docx`](examples/harbour-library-brief.docx). To open your own document, ask Copilot to open Ternleaf with its path, for example `docs/brief.docx`. Each document gets its own project file in `.ternleaf/`, and the original file is never changed.
+To work on your own documents, put them in the project folder and press Ctrl+O, or ask Copilot to open one, for example "open docs/brief.docx in the Ternleaf canvas". Each document gets its own project file in `.ternleaf/`, and the original file is never changed.
 
 [Install and run Ternleaf](docs/Install.md) covers fonts, configuration and troubleshooting.
 
 | Shortcut | Action |
 | --- | --- |
+| Ctrl+O | Open another document |
 | Ctrl+Shift+Space | Open the Review pane for the selection |
 | Ctrl+Enter | Send the instruction |
 
@@ -104,7 +111,7 @@ Ternleaf is strict about what it changes, because an edited DOCX must still open
 
 - One document is open in one canvas at a time.
 - A proposal changes text inside one paragraph, within text that has the same formatting. A suggestion that crosses a formatting boundary is shown as not applicable.
-- Export refuses to write a DOCX if the engine reports that source content would be lost.
+- Export refuses to write a DOCX if the engine reports that source content would be lost. For one known, small loss it asks you first. PDF, Markdown, web page and plain text export always work.
 - The canvas API of the Copilot SDK is experimental and can change.
 - Ternleaf was developed and tested on Windows.
 

@@ -12,21 +12,23 @@ Ternleaf aims to be a document studio for substantial writing: precise pages, st
 
 ## Today: write and review
 
-- Open a DOCX in a Copilot canvas with real pages.
+- Open a DOCX in a Copilot canvas with real pages, and the full editor around it: styles, tables, pictures, headers, notes, comments and tracked changes.
+- Open, create and add documents in the project folder. Each document keeps its own history.
 - Ask Copilot to revise a selected passage, with quick requests or an instruction.
 - Review the changed words, the reason and the page before and after. Choose between options, or edit the proposal.
 - Review a whole document through a queue of suggestions.
 - Every edit is a saved revision with undo, redo, recovery after a reload and an edition note.
-- Export a DOCX, guarded against lost content.
+- Export a DOCX, guarded against lost content, or a PDF, Markdown, web page or plain text.
 
 The limits: a proposal changes text inside one paragraph and within text of the same formatting, and one document is open in one canvas at a time. [Word fidelity](Word-Fidelity.md) lists what is verified against Word.
 
 ## Next: widen what can be edited and exported
 
 1. **More Word-authored documents.** Other chart types and styling, paragraphs with fields, tabs and breaks, and source XML that the importer drops without a report. Each construct needs a rule for edits and a test before export allows it.
-2. **Wider proposals.** Changes across formatting boundaries, whole paragraphs and several paragraphs, still as one reviewed operation.
-3. **Performance on long documents.** Measure admission, preview and journal replay separately, and add journal checkpoints.
-4. **Structural agent proposals.** Split, join, move and restyle, with the same review and the same preview.
+2. **Wider proposals.** Changes across formatting boundaries, whole paragraphs and several paragraphs, still as one reviewed operation. With that, Copilot can also draft new text at the cursor.
+3. **Proposals in Suggesting mode.** An accepted proposal becomes a Word tracked change when the author wants that.
+4. **Performance on long documents.** Measure admission, preview and journal replay separately, and add journal checkpoints.
+5. **Structural agent proposals.** Split, join, move and restyle, with the same review and the same preview.
 
 ## Later
 

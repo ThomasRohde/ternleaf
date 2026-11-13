@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { createWorkspace } from "../apps/host/project.mjs";
 import { startHost } from "../apps/host/serve.mjs";
 
 const [playwright, chrome, engine, out, font, ...additionalFonts] = process.argv.slice(2);
@@ -24,9 +25,9 @@ try {
     await page.route("**/*", route => route.request().url().startsWith(base + "/") ? route.continue() : route.abort());
     await page.goto(host.url, { waitUntil: "domcontentloaded" });
     try {
-      await page.getByText(/^Saved at revision /).waitFor({ timeout: 60_000 });
+      await page.locator("#ternleaf-panel [role=status]").filter({ hasText: /^Saved at revision / }).waitFor({ timeout: 60_000 });
     } catch (error) {
-      console.error(await page.locator("#ternleaf-panel [role=status]").textContent().catch(() => "(editor absent)"));
+      console.error(await page.locator("#ternleaf-start [role=status]").textContent().catch(() => "(editor absent)"));
       throw error;
     }
     return page;
@@ -204,8 +205,58 @@ try {
   }
   await writeFile(join(out, "geometry-browser.json"), JSON.stringify(geometry.map(page => page.origins)));
   await close(page);
+  // A project with several documents: open another one, make a new one, add
+  // a copy of a file, and return to the last document in a new canvas.
+  const folder = join(out, "project-" + run);
+  await mkdir(join(folder, "docs"), { recursive: true });
+  await mkdir(join(folder, ".ternleaf"));
+  await copyFile(join(out, "owned.docx"), join(folder, "docs", "First.docx"));
+  await copyFile(join(out, "geometry.docx"), join(folder, "docs", "Second.docx"));
+  await writeFile(join(folder, ".ternleaf", "canvas.json"), JSON.stringify({ engine, source: "docs/First.docx", state: ".ternleaf/first.sqlite" }));
+  const workspace = createWorkspace({ project: folder });
+  const openProject = async () => {
+    host = await startHost({ ...workspace.resolve(), workspace, askAgent: id => { requestId = id; } });
+    const view = await browser.newPage({ viewport: { width: 1450, height: 1050 } });
+    view.on("pageerror", error => console.error(error.message));
+    await view.goto(host.url, { waitUntil: "domcontentloaded" });
+    return view;
+  };
+  const shows = (view, name) => view.locator("#ternleaf-panel [data-ready=true], #ternleaf-panel[data-ready=true]")
+    .locator("[data-part=name]").filter({ hasText: name }).waitFor({ timeout: 60_000 });
+  page = await openProject();
+  await shows(page, "First.docx");
+  await editEnd(page, "Z");
+  assert.equal((await state(page)).head, 1);
+  await page.keyboard.press("Control+s");
+  await page.getByText("Saved at revision 1. Ternleaf saves every change.").waitFor();
+  await page.keyboard.press("Control+o");
+  await page.locator("#ternleaf-documents .tl-doc").filter({ hasText: "Second" }).click();
+  await shows(page, "Second.docx");
+  assert.equal((await state(page)).head, 0);
+  await page.locator("#ternleaf-panel [data-action=documents]").click();
+  await page.getByRole("button", { name: "New document…" }).click();
+  await page.locator("#ternleaf-new [data-part=name]").fill("Third: a/b");
+  await page.getByRole("button", { name: "Create document" }).click();
+  await shows(page, "Third a b.docx");
+  const chooser = page.waitForEvent("filechooser");
+  await page.keyboard.press("Control+o");
+  await page.getByRole("button", { name: "Add a file from this computer…" }).click();
+  await (await chooser).setFiles(join(out, "owned.docx"));
+  await shows(page, "owned.docx");
+  assert.deepEqual((await readdir(join(folder, "documents"))).sort(), ["owned.docx"]);
+  assert.deepEqual((await readdir(join(folder, "docs"))).sort(), ["First.docx", "Second.docx", "Third a b.docx"]);
+  // The agent opens a document in the open canvas. The page follows.
+  host.openDocument("docs/First.docx");
+  await shows(page, "First.docx");
+  assert.equal((await state(page)).head, 1);
+  assert(await hasText(page, "Alpha KEEP omegaZ"));
+  await close(page);
+  page = await openProject();
+  await shows(page, "First.docx");
+  await close(page);
+
   console.log(JSON.stringify({ synchronousAdmissionMs: admission }));
-  console.log("Browser selection review, saved draft, stale action rejection after reload, lost-response recovery, decline, discard, alternatives, author edit, document review, export, undo, retry and redo passed.");
+  console.log("Browser selection review, saved draft, stale action rejection after reload, lost-response recovery, decline, discard, alternatives, author edit, document review, export, undo, retry, redo and project documents passed.");
 } finally {
   await browser.close();
   await host?.close();

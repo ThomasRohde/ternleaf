@@ -1,11 +1,5 @@
 # Dependencies
 node_modules/
-# The extension's node_modules are committed so the canvas works without
-# an install step when imported directly from the repository. Platform
-# packages from the Copilot SDK are excluded; the app supplies them.
-!.github/extensions/ternleaf/node_modules/
-!.github/extensions/ternleaf/node_modules/**
-.github/extensions/ternleaf/node_modules/@github/copilot-sdk-*/
 
 # Build output and local tools
 .build/

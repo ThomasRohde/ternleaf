@@ -2044,7 +2044,7 @@ index 20970a8..ee332eb 100644
                          kind: EmbeddedKind::Chart,
                          part: EmbeddedPart {
 diff --git a/webapp/src/editor_file_open.mjs b/webapp/src/editor_file_open.mjs
-index a0805f3..4d048de 100644
+index a0805f3..d5bc1e0 100644
 --- a/webapp/src/editor_file_open.mjs
 +++ b/webapp/src/editor_file_open.mjs
 @@ -111,7 +111,7 @@ export function createFileOpen(ed) {
@@ -2056,16 +2056,48 @@ index a0805f3..4d048de 100644
        e.preventDefault();
        e.returnValue = "";
      });
-@@ -269,6 +269,9 @@ export function createFileOpen(ed) {
+@@ -269,6 +269,11 @@ export function createFileOpen(ed) {
     *   `failedStatus(reason)` are what the status line says.
     */
    async function openBytes(bytes, name, onOpened, onRendered, options = {}) {
 +    if (globalThis.ternleafProjectAttached) {
-+      throw new Error("Open another document in its own Ternleaf project.");
++      // The document on screen belongs to its Ternleaf project. Other bytes
++      // become a document of their own, and Ternleaf decides how.
++      return globalThis.ternleafOpen(bytes, name);
 +    }
      let replaced = false; // set where the previous document is freed: past it, nothing is "still here" (HF-381)
      // A PDF is imported in slices behind its own progress dialog (`docs/182` §6),
      // never by the synchronous `open`: the bytes decide, not the name, exactly as
+diff --git a/webapp/src/editor_palette.mjs b/webapp/src/editor_palette.mjs
+index 104a53a..0d743bd 100644
+--- a/webapp/src/editor_palette.mjs
++++ b/webapp/src/editor_palette.mjs
+@@ -731,7 +731,10 @@ export function createPalette(ed) {
+     // id it already has instead of shipping ungated (`SKILL` §10: fix the pattern).
+     // Then to the CONTAINER's grant for deciding a tracked change, which the host
+     // contract has always required `edit` for (HF-199, `review_authority.mjs`).
+-    return narrowDecisionsToContainer(ed.SESSION.narrow(cmds.filter((command) => ed.doc || command.noDoc)), ed.HOST_CAPS);
++    const offered = narrowDecisionsToContainer(ed.SESSION.narrow(cmds.filter((command) => ed.doc || command.noDoc)), ed.HOST_CAPS);
++    // A Ternleaf project owns open, new and save. It replaces those commands
++    // here, in the one registry that every surface reads.
++    return globalThis.ternleafCommands ? globalThis.ternleafCommands(offered, context) : offered;
+   }
+ 
+   return { cmdInput, cmdList, cmdPalette, editorCommands, searchTrigger };
+diff --git a/webapp/src/editor_ribbon.mjs b/webapp/src/editor_ribbon.mjs
+index c047b27..6795b28 100644
+--- a/webapp/src/editor_ribbon.mjs
++++ b/webapp/src/editor_ribbon.mjs
+@@ -304,7 +304,8 @@ export function createRibbon(ed) {
+    *  about whether work would be lost (docs/104 T-14: one dirty signal, one
+    *  reader). */
+   async function confirmDiscardIfEdited() {
+-    if (!ed.documentIsDirty()) return true;
++    // A Ternleaf project saves every revision, so nothing can be lost here.
++    if (globalThis.ternleafProjectAttached || !ed.documentIsDirty()) return true;
+     return confirmModal({
+       title: "Discard unsaved changes?",
+       message: `Opening another file replaces “${ed.currentName || "this document"}”. Your edits have not been saved and there is no copy of them anywhere else.`,
 diff --git a/webapp/src/editor_save.mjs b/webapp/src/editor_save.mjs
 index aad221b..d7647a3 100644
 --- a/webapp/src/editor_save.mjs

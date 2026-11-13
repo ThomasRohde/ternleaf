@@ -17,7 +17,7 @@
 
 ## Change the shell
 
-The host serves `apps/editor` without a cache. After a change to the editor's script or styles, close the canvas and open it again. After a change to the host, the store or the extension, start a new Copilot session, because the extension process keeps running for the life of a session.
+The host serves `apps/editor` without a cache. After a change to the shell's scripts or styles, close the canvas and open it again. The files of the engine in `engine/prebuilt/webapp` come from the patch: change them in an OpenDoc checkout, write the new diff to `engine/opendoc.patch`, and copy the changed files. After a change to the host, the store or the extension, start a new Copilot session, because the extension process keeps running for the life of a session.
 
 To run the editor in an ordinary browser, start the host yourself:
 
@@ -35,11 +35,11 @@ It prints a URL with the access token. **Ask Copilot** answers "Copilot is not c
 npm test
 ```
 
-They need Node.js 24 and nothing else. They cover the session store (leases, publication, recovery after a killed process, undo and receipts), the review path, alternatives and author edits, whole-document suggestions, document selection, the comparison of changed words and the export check.
+They need Node.js 24 and nothing else. They cover the session store (leases, publication, recovery after a killed process, undo and receipts), the review path, alternatives and author edits, whole-document suggestions, the project's documents (listing, the last document, new and added files, a file that changed on disk), the host's document switching over HTTP, the comparison of changed words and the export check.
 
 ### Browser test
 
-[`tests/browser.mjs`](../tests/browser.mjs) drives the real editor and host in Chrome with Playwright and plays the agent through the host's own functions. It covers a request, a saved draft, a reload, a lost reply during acceptance, decline, discard, alternatives, an author edit, a whole-document review, export, undo, retry and redo.
+[`tests/browser.mjs`](../tests/browser.mjs) drives the real editor and host in Chrome with Playwright and plays the agent through the host's own functions. It covers a request, a saved draft, a reload, a lost reply during acceptance, decline, discard, alternatives, an author edit, a whole-document review, export, undo, retry and redo, and a project with several documents: open, new, add a file and a document that Copilot opens.
 
 ```powershell
 python -m pip install python-docx==1.2.0 lxml==6.0.2

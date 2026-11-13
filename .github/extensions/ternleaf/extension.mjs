@@ -1,7 +1,7 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CanvasError, createCanvas, joinSession } from "@github/copilot-sdk/extension";
-import { ProjectError, resolveProject } from "../../../apps/host/project.mjs";
+import { ProjectError, createWorkspace } from "../../../apps/host/project.mjs";
 import { startHost } from "../../../apps/host/serve.mjs";
 import { Rejected } from "../../../packages/session/store.mjs";
 import { forAgent } from "../../../packages/session/messages.mjs";
@@ -57,12 +57,13 @@ const canvas = createCanvas({
   displayName: "Ternleaf",
   description: "Write and revise a local Word document (DOCX). The author shares a selected passage or the document text and asks for changes, then reviews each proposal before it changes the document.",
   icon: "icon.svg",
+  // Copilot often opens a canvas with no input at all, so null is valid too.
   inputSchema: {
-    type: "object", additionalProperties: false,
+    type: ["object", "null"], additionalProperties: false,
     properties: {
       document: {
         type: "string",
-        description: "Optional path of a .docx file inside the project, for example docs/brief.docx. Omit it to open the project's default document.",
+        description: "Optional path of a .docx file inside the project, for example docs/brief.docx. Omit it to return to the document that was open last.",
       },
     },
   },
@@ -138,24 +139,33 @@ const canvas = createCanvas({
   ],
   async open({ instanceId, input, session: context }) {
     let host = instances.get(instanceId);
-    if (!host) {
-      let settings;
-      try {
-        settings = resolveProject({ project, workingDirectory: context?.workingDirectory, document: input?.document });
-      } catch (error) {
-        if (error instanceof ProjectError) throw new CanvasError("project", error.message);
-        throw error;
-      }
-      try {
-        host = await startHost({
-          ...settings,
+    try {
+      if (host) {
+        // The canvas is open already. A path asks it to show that document.
+        if (input?.document) host.openDocument(input.document);
+      } else {
+        const workspace = createWorkspace({ project, workingDirectory: context?.workingDirectory });
+        const start = (settings, restart = false) => startHost({
+          ...settings, workspace, restart, port: workspace.port,
           askAgent: async (id, scope) => (session ?? await sessionReady.promise).send({ prompt: prompt(instanceId, id, scope) }),
         });
-      } catch (error) {
-        if (error instanceof Rejected) throw new CanvasError(error.code, forAgent(error.code));
-        throw error;
+        if (input?.document) host = await start(workspace.resolve(input.document));
+        else {
+          try { host = await start(workspace.resolve()); }
+          catch (error) {
+            if (!(error instanceof Rejected) || error.code !== "source-already-set") throw error;
+            // The document to return to changed on disk. Show the
+            // introduction. The author can open the changed document from
+            // the canvas, which asks before it starts a new history.
+            host = await start(workspace.resolve(workspace.welcome), true);
+          }
+        }
+        instances.set(instanceId, host);
       }
-      instances.set(instanceId, host);
+    } catch (error) {
+      if (error instanceof ProjectError) throw new CanvasError("project", error.message);
+      if (error instanceof Rejected) throw new CanvasError(error.code, forAgent(error.code));
+      throw error;
     }
     return { title: host.name, url: host.url };
   },

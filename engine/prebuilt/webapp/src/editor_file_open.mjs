@@ -270,7 +270,9 @@ export function createFileOpen(ed) {
    */
   async function openBytes(bytes, name, onOpened, onRendered, options = {}) {
     if (globalThis.ternleafProjectAttached) {
-      throw new Error("Open another document in its own Ternleaf project.");
+      // The document on screen belongs to its Ternleaf project. Other bytes
+      // become a document of their own, and Ternleaf decides how.
+      return globalThis.ternleafOpen(bytes, name);
     }
     let replaced = false; // set where the previous document is freed: past it, nothing is "still here" (HF-381)
     // A PDF is imported in slices behind its own progress dialog (`docs/182` §6),

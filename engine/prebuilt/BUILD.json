@@ -1,7 +1,13 @@
 {
   "opendoc": "5ac261ceadbb0fa0bcbe729ce3c2e20721756949",
-  "patchSha256": "8c523f25a6c7e1c955c15232bd7d92ab66b739b334c88027363828e5250d43af",
-  "wasmSha256": "73249124c35428da73aa138295d754b4dda58101f17c42516863e64d0ed9f180",
-  "wasmBytes": 117700319,
-  "built": "2026-11-12"
+  "patchSha256": "9c603be5da4e7d453d8f05ee984bca4081c3b229400123e42ebe2407a1db7aeb",
+  "wasmSha256": "bd4f5fda3f59705c4b5ce3f3b3e40cb68060e1fabb66eba80d829dc1a7eded08",
+  "wasmBytes": 28683093,
+  "profile": "release, opt-level z with OpenDoc's per-crate overrides, wasm-opt -Oz",
+  "tools": {
+    "rust": "1.97.1",
+    "wasm-bindgen": "0.2.129",
+    "binaryen": "132"
+  },
+  "built": "2026-11-13"
 }

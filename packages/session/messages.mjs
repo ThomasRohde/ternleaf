@@ -17,7 +17,11 @@ const author = {
   "agent-unreachable": "Copilot did not take the request. Send it again.",
   "empty-document": "The document has no text to review.",
   "invalid-replacement": "Give text for one paragraph that differs from the original: no line breaks or tabs, at most 4,000 characters.",
-  "source-already-set": "This project file belongs to a different document.",
+  "source-already-set": "This file changed since Ternleaf last opened it.",
+  "document-changed": "This canvas now shows another document.",
+  "single-document": "This canvas shows one document.",
+  "request-too-large": "That file is too large. Ternleaf opens files up to 64 MB.",
+  "invalid-request": "The request was not complete.",
   "publication-unknown": "The save could not be confirmed. Reload to get the saved revision.",
   "authorization": "This canvas lost its connection. Reopen Ternleaf from the Copilot canvas menu.",
 };
@@ -29,6 +33,7 @@ const agent = {
   "invalid-rationale": "Give a reason of at most 600 characters.",
   "proposal-already-submitted": "This request already has an answer. The author reviews it in the canvas. Do not send another.",
   "invalid-suggestions": "Suggestions refused. Give 1 to 60 suggestions. Each needs a paragraph number from ternleaf_read, a find text copied exactly from that paragraph (no line breaks or tabs), and a different replacement.",
+  "source-already-set": "This file changed since Ternleaf last opened it. Tell the author to open it with File, Open in the canvas. The canvas asks before it starts a new history.",
   "writer-fenced": "The Ternleaf canvas is not ready. Tell the author to reload the canvas and send the request again.",
 };
 

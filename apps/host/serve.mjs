@@ -1,9 +1,10 @@
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { createReadStream, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync } from "node:fs";
 import { basename, dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ProjectStore, Rejected } from "../../packages/session/store.mjs";
+import { ProjectError } from "./project.mjs";
 
 const mime = { ".mjs": "text/javascript", ".js": "text/javascript", ".html": "text/html",
   ".json": "application/json", ".wasm": "application/wasm", ".css": "text/css",
@@ -16,23 +17,30 @@ function json(res, status, value) {
   res.end(JSON.stringify(value));
 }
 
-async function body(req) {
+async function raw(req, limit) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 8 * 1024 * 1024) throw new Rejected("request-too-large");
+    if (size > limit) throw new Rejected("request-too-large");
     chunks.push(chunk);
   }
-  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
-  catch { throw new Rejected("invalid-json"); }
+  return Buffer.concat(chunks);
+}
+
+async function body(req) {
+  try { return JSON.parse((await raw(req, 8 * 1024 * 1024)).toString("utf8")); }
+  catch (error) {
+    if (error instanceof Rejected) throw error;
+    throw new Rejected("invalid-json");
+  }
 }
 
 function staticFile(res, root, path, noStore = false) {
   const file = resolve(root, "." + path);
   if (!file.startsWith(root + sep)) return false;
-  // The prebuilt engine stores its WebAssembly module compressed, to stay
-  // under the file size limit of a Git host. The browser inflates it.
+  // The prebuilt engine stores its WebAssembly module compressed, to keep
+  // the repository small. The browser inflates it.
   let physical;
   let encoded = false;
   for (const candidate of [file, file + ".gz"]) {
@@ -52,15 +60,68 @@ function staticFile(res, root, path, noStore = false) {
   return true;
 }
 
+// One host serves one canvas. It holds one open document at a time. With a
+// `workspace` (see project.mjs), the author can open another document of the
+// project, make a new one or add a copy of a file: the host then closes the
+// project file of the first document and opens that of the second, and the
+// editor reloads. Without a workspace, the host serves `source` and `state`.
 export async function startHost({ source, state, engine, font, fonts = font ? [font] : [], port = 0,
-  askAgent, loseProposalReplyOnce = false, captureWordComparison = false }) {
+  askAgent, loseProposalReplyOnce = false, captureWordComparison = false, workspace, restart = false }) {
   const root = realpathSync(engine);
   const ui = realpathSync(editorAssets);
-  const sourceBytes = readFileSync(source);
   const fontBytes = fonts.map(path => readFileSync(path));
-  mkdirSync(dirname(resolve(state)), { recursive: true });
-  const store = new ProjectStore(state, { leaseMs: 15_000 });
-  try { store.initialize(sourceBytes); } catch (error) { store.close(); throw error; }
+  let store, sourceBytes, name, current, opened = false;
+  // Counts the documents this host has served. The editor sends the number
+  // with each call, so a page that still shows an earlier document reloads.
+  let epoch = 0;
+  let lease;
+  // Set when the agent finished a turn and the newest request has no answer.
+  let unanswered;
+  // The document text the author shared for the current whole-document
+  // request. It stays in memory and is replaced by the next request.
+  let shared;
+
+  function remember() {
+    if (!workspace || !opened || !store) return;
+    try { workspace.remember(current, Number(store.project().head)); } catch { /* A convenience only. */ }
+  }
+
+  // Open the project file of a document. `restart` begins a new history when
+  // the .docx changed since its project file was made. The earlier project
+  // file moves to .ternleaf/archive.
+  function load(settings, { restart = false } = {}) {
+    const bytes = readFileSync(settings.source);
+    mkdirSync(dirname(resolve(settings.state)), { recursive: true });
+    let next = new ProjectStore(settings.state, { leaseMs: 15_000 });
+    try { next.initialize(bytes); }
+    catch (error) {
+      next.close();
+      if (!(error instanceof Rejected) || error.code !== "source-already-set" || !restart) throw error;
+      const archive = resolve(dirname(resolve(settings.state)), "archive");
+      mkdirSync(archive, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15);
+      for (const suffix of ["", "-wal", "-shm"]) {
+        if (existsSync(settings.state + suffix)) {
+          renameSync(settings.state + suffix, resolve(archive, `${stamp}-${basename(settings.state)}${suffix}`));
+        }
+      }
+      next = new ProjectStore(settings.state, { leaseMs: 15_000 });
+      try { next.initialize(bytes); } catch (again) { next.close(); throw again; }
+    }
+    if (store) {
+      remember();
+      if (lease) store.release(lease);
+      store.close();
+    }
+    store = next;
+    sourceBytes = bytes;
+    name = basename(settings.source);
+    current = settings.source;
+    opened = false;
+    lease = shared = unanswered = undefined;
+    epoch += 1;
+  }
+  load({ source, state }, { restart });
   const token = randomBytes(32).toString("hex");
   const secret = Buffer.from("Bearer " + token);
   const fontHashes = fontBytes.map(bytes => createHash("sha256").update(bytes).digest("hex"));
@@ -68,13 +129,6 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
     ? createHash("sha256").update(JSON.stringify(fontHashes)).digest("hex")
     : fontHashes[0] ?? null;
   const session = randomUUID();
-  const name = basename(source);
-  let lease;
-  // Set when the agent finished a turn and the newest request has no answer.
-  let unanswered;
-  // The document text the author shared for the current whole-document
-  // request. It stays in memory and is replaced by the next request.
-  let shared;
 
   const server = createServer(async (req, res) => {
     res.setHeader("Referrer-Policy", "no-referrer");
@@ -104,12 +158,46 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
           return res.end(bytes);
         }
         if (req.method !== "POST") return json(res, 405, { error: "method" });
+        if (path === "/api/import") {
+          // A copy of a file from the author's computer becomes a document
+          // of the project. The bytes are the request body.
+          if (!workspace) return json(res, 409, { error: "single-document" });
+          const bytes = new Uint8Array(await raw(req, 64 * 1024 * 1024));
+          let title;
+          try { title = decodeURIComponent(String(req.headers["x-ternleaf-name"] ?? "")); }
+          catch { title = ""; }
+          load(workspace.resolve(workspace.create({ name: title, folder: "documents", bytes })));
+          return json(res, 200, { name });
+        }
         const data = await body(req);
+        const sent = req.headers["x-ternleaf-epoch"];
+        if (sent !== undefined && Number(sent) !== epoch) return json(res, 409, { error: "document-changed" });
         switch (path) {
+          case "/api/documents":
+            if (!workspace) return json(res, 200, { current: null, documents: [], folders: [], single: true });
+            return json(res, 200, { current: workspace.key(current), ...workspace.documents() });
+          case "/api/open":
+            if (!workspace) return json(res, 409, { error: "single-document" });
+            load(workspace.resolve(data.path), { restart: data.restart === true });
+            return json(res, 200, { name });
+          case "/api/new": {
+            if (!workspace) return json(res, 409, { error: "single-document" });
+            if (typeof data.bytes !== "string") throw new Rejected("invalid-request");
+            const bytes = new Uint8Array(Buffer.from(data.bytes, "base64"));
+            load(workspace.resolve(workspace.create({ name: data.name, folder: data.folder ?? "", bytes })));
+            return json(res, 200, { name });
+          }
+          case "/api/opened":
+            // The editor showed the document. Only now is it worth returning to.
+            store.checkLease(data.lease);
+            opened = true;
+            remember();
+            return json(res, 200, {});
           case "/api/claim": {
             const claimed = store.claim(data.previous);
             lease = claimed.lease;
-            return json(res, 200, { ...claimed, name, fontHash, fontCount: fontBytes.length,
+            return json(res, 200, { ...claimed, name, epoch, workspace: Boolean(workspace),
+              fontHash, fontCount: fontBytes.length,
               captureWordComparison, reviews: reviews(lease), accepted: store.acceptedReviews(lease),
               suggestions: suggestions(lease) });
           }
@@ -182,16 +270,29 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
       return json(res, 404, { error: "asset" });
     } catch (error) {
       if (error instanceof Rejected) return json(res, 409, { error: error.code });
+      if (error instanceof ProjectError) return json(res, 409, { error: "project", message: error.message });
       console.error(error.message);
       return json(res, 500, { error: "publication-unknown" });
     }
   });
-  try {
-    await new Promise((accept, reject) => {
-      server.once("error", reject);
-      server.listen(port, "127.0.0.1", accept);
-    });
-  } catch (error) { store.close(); throw error; }
+  // A project asks for the same port each time, so that the editor keeps its
+  // origin and with it the author's settings and personal dictionary. If
+  // that port is taken, for example by a second canvas, any free port works.
+  const candidates = [...new Set([port, 0])];
+  for (const candidate of candidates) {
+    try {
+      await new Promise((accept, reject) => {
+        const failed = error => { server.off("listening", listening); reject(error); };
+        const listening = () => { server.off("error", failed); accept(); };
+        server.once("error", failed);
+        server.once("listening", listening);
+        server.listen(candidate, "127.0.0.1");
+      });
+      break;
+    } catch (error) {
+      if (error.code !== "EADDRINUSE" || candidate === candidates.at(-1)) { store.close(); throw error; }
+    }
+  }
   function reviews(current) {
     const state = store.reviewState(current);
     return { ...state, unanswered: Boolean(state.draft && state.draft.id === unanswered
@@ -202,7 +303,14 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
     return { ...state, unanswered: Boolean(state.batch?.state === "waiting" && state.batch.id === unanswered) };
   }
   return {
-    name,
+    get name() { return name; },
+    // Open another document of the project in this canvas. The editor
+    // reloads when it next calls the host.
+    openDocument(document, options) {
+      if (!workspace) throw new ProjectError("This canvas shows one document.");
+      const settings = workspace.resolve(document);
+      if (settings.source !== current) load(settings, options);
+    },
     url: `http://127.0.0.1:${server.address().port}/editor.html?blank=1&autosave=0&ternleaf=1#${token}`,
     readReview(id) {
       if (shared?.id === id) {
@@ -255,6 +363,7 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
     },
     async close() {
       await new Promise(accept => server.close(accept));
+      remember();
       if (lease) store.release(lease);
       store.close();
     },
