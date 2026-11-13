@@ -9,7 +9,7 @@ const engines = ["opendoc", "engine/prebuilt/webapp"];
 const welcome = "examples/welcome-to-ternleaf.docx";
 const maxBytes = 64 * 1024 * 1024;
 // Folders that hold tools and build output, never the author's documents.
-const skipped = new Set(["node_modules", "engine", "opendoc", "dist", "target", "build", "notices"]);
+const skipped = new Set(["node_modules", "engine", "exports", "opendoc", "dist", "target", "build", "notices"]);
 
 // The documents of one project folder.
 //
@@ -83,6 +83,9 @@ export function createWorkspace({ project, workingDirectory }) {
       fonts: settings.fonts?.map(path => resolve(home, path)),
       loseProposalReplyOnce: settings.verification?.loseProposalReplyOnce === true,
       captureWordComparison: settings.verification?.captureWordComparison === true,
+      // With "chat": false, Copilot works only on what the author sends
+      // from the canvas. It cannot read the document for a chat request.
+      chat: settings.chat !== false,
     };
     if (!existsSync(result.engine)) {
       throw new ProjectError("The OpenDoc engine is missing. Set \"engine\" in .ternleaf/canvas.json. See docs/Install.md.");
@@ -187,11 +190,30 @@ export function createWorkspace({ project, workingDirectory }) {
     throw new ProjectError("Too many documents have that name. Choose another name.");
   }
 
+  // Write an export of a document into the exports folder of the project and
+  // return its path. An export is a copy that can be made again, so a file
+  // with the same name is replaced.
+  function exportFile({ name, extension, bytes }) {
+    if (!(bytes instanceof Uint8Array) || !bytes.length || bytes.length > maxBytes || !/^[a-z0-9]{1,5}$/.test(extension)) {
+      throw new ProjectError("The export could not be written.");
+    }
+    const directory = resolve(roots[0], "exports");
+    try {
+      mkdirSync(directory, { recursive: true });
+      const file = join(directory, `${cleanName(name)}.${extension}`);
+      writeFileSync(file, bytes);
+      return key(realpathSync(file));
+    } catch (error) {
+      if (error instanceof ProjectError) throw error;
+      throw new ProjectError("The export could not be written: " + error.code);
+    }
+  }
+
   // The port that this project's host asks for first. It is the same for
   // every canvas of the project, so the editor keeps one origin.
   const port = 42000 + (Number.parseInt(createHash("sha256").update(home).digest("hex").slice(0, 8), 16) % 16000);
 
-  return { resolve: resolveDocument, documents, remember, create, key, project: home, welcome, port };
+  return { resolve: resolveDocument, documents, remember, create, exportFile, key, project: home, welcome, port };
 }
 
 // The settings for one canvas. See createWorkspace.

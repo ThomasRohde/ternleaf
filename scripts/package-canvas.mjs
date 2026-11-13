@@ -22,8 +22,8 @@ function copy(from, to) {
   cpSync(from, to, { recursive: true, errorOnExist: true, force: false });
 }
 const extension = ".github/extensions/ternleaf";
-for (const path of ["LICENSE", "apps/editor", "apps/host", "packages/session", "examples",
-  `${extension}/extension.mjs`, `${extension}/icon.svg`, `${extension}/package.json`, `${extension}/package-lock.json`]) {
+for (const path of ["LICENSE", "apps/agent", "apps/editor", "apps/host", "packages/session", "examples",
+  ".github/skills/ternleaf/SKILL.md", `${extension}/extension.mjs`, `${extension}/icon.svg`, `${extension}/package.json`, `${extension}/package-lock.json`]) {
   copy(join(project, path), join(output, path));
 }
 const notices = join(output, "notices");

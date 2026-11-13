@@ -91,7 +91,7 @@ export function layout() {
             <button type="button" class="tl-button tl-primary" data-action="request" disabled
               title="Send to Copilot (Ctrl+Enter)">${icon.send}<span data-part="request-label">Ask Copilot</span></button>
           </div>
-          <p class="tl-help" data-part="compose-help">Copilot reads only the passage you select. You review each proposal before it changes the document.</p>
+          <p class="tl-help" data-part="compose-help">Copilot reads the passage you select here, or the text that you ask about in the chat. You review each proposal before it changes the document.</p>
         </div>
         <div data-part="waiting" class="tl-stack" hidden>
           <p class="tl-asked" data-part="waiting-prompt"></p>

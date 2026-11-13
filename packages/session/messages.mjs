@@ -35,7 +35,30 @@ const agent = {
   "invalid-suggestions": "Suggestions refused. Give 1 to 60 suggestions. Each needs a paragraph number from ternleaf_read, a find text copied exactly from that paragraph (no line breaks or tabs), and a different replacement.",
   "source-already-set": "This file changed since Ternleaf last opened it. Tell the author to open it with File, Open in the canvas. The canvas asks before it starts a new history.",
   "writer-fenced": "The Ternleaf canvas is not ready. Tell the author to reload the canvas and send the request again.",
+  "writer-active": "The Ternleaf canvas is not ready. Wait a few seconds and try once more.",
+  "canvas-not-ready": "The Ternleaf canvas does not show the document yet. Wait a few seconds and try once more. If it fails again, tell the author to reload the Ternleaf canvas.",
+  "canvas-timeout": "The Ternleaf canvas did not answer in time. Try once more. If it fails again, tell the author to reload the Ternleaf canvas.",
+  "canvas-closed": "This Ternleaf canvas is closed. Open it again with open_canvas.",
+  "canvas-error": "The Ternleaf canvas could not do this.",
+  "document-changed": "The canvas now shows another document. Call ternleaf_status, then read again.",
+  "no-selection": "The author has no text selected. Ask the author to select text within one paragraph. Or read the document with ternleaf_read and answer with ternleaf_suggest.",
+  "selection-changed": "The text you gave is not the text that is selected now. Call ternleaf_status to get the selection, then send the proposal for that text.",
+  "stale-document": "The document changed after you read it. Call ternleaf_read again, then send the suggestions with the new revision number.",
+  "stale-revision": "The document changed. Call ternleaf_status, then try again.",
+  "review-in-progress": "The author has a proposal or suggestions in the canvas that are not decided. Do not send more now. Tell the author to finish that review, then ask again.",
+  "request-waiting": "The author sent a request from the canvas that waits for your answer. Answer it first: call ternleaf_read with its requestId.",
+  "invalid-selection-or-instructions": "Give the instructions: the author's request in one or two sentences, at most 2,000 characters.",
+  "page-out-of-range": "That page does not exist.",
+  "export-needs-author": "This Word export leaves out a legacy part of the original file, and only the author can accept that. Ask the author to choose Export DOCX in the canvas once. The pdf, markdown, html and text formats work now.",
+  "export-refused": "Ternleaf cannot write this document as a Word file without losing content. Use the pdf, markdown, html or text format.",
+  "chat-access-off": "In this project, Copilot works only on what the author sends from the canvas. You cannot read the document or send proposals for a request from the chat. Tell the author to select the text, or to choose Whole document, in the Review pane and send the request there.",
+  "single-document": "This canvas shows one document and has no project folder.",
+  "invalid-request": "The input is not valid. Read the input schema of the action with list_canvas_capabilities.",
 };
+
+// One sentence for the agent: what was refused and what to do next.
+export const refusalForAgent = error => [agent[error.code] ?? author[error.code] ?? error.code, error.detail]
+  .filter(Boolean).join(" ");
 
 export const forAuthor = code => author[code] ?? code;
 export const forAgent = code => agent[code] ?? author[code] ?? code;

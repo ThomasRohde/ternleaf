@@ -11,7 +11,7 @@
 
 ![Ternleaf shows a Copilot proposal beside the document, with the changed words and a page preview](docs/assets/screenshots/review-proposal.png)
 
-Ternleaf opens a local DOCX in a Copilot canvas with a real page layout. You select a passage or share the whole document, Copilot proposes changes, and you accept, edit or discard each one. Copilot cannot change the document. Only your acceptance does.
+Ternleaf opens a local DOCX in a Copilot canvas with a real page layout. You select a passage, share the whole document or ask in the chat. Copilot proposes changes, and you accept, edit or discard each one. Copilot cannot change the document. Only your acceptance does.
 
 > **Status: early release.** Ternleaf works end to end on a bounded set of documents and edits. Read [What works today](#what-works-today) before you use it for real work.
 
@@ -32,6 +32,10 @@ Each proposal shows the changed words, Copilot's reason, and the page before and
 Choose **Whole document** and a review such as **Proofread** or **Check consistency**. Ternleaf sends the document text for that one request. Copilot returns a list of suggestions, and you step through them.
 
 ![The Review pane lists three suggestions from a whole-document proofread](docs/assets/screenshots/document-review.png)
+
+### Ask in the chat
+
+You can also type in the Copilot chat: "Proofread the document", "Make the selected sentence shorter", "Is the chart on page 2 easy to read?" or "Give me a PDF". Copilot reads the current text through the canvas, looks at a page when it must see the layout, and puts its proposals in the Review pane with the label **From the chat**. A notice in the canvas tells you each time Copilot reads the document.
 
 ### Open, create and add documents
 
@@ -58,8 +62,9 @@ The pane docks beside the page when there is room and slides over it when there 
 ```
 GitHub Copilot app
  ├─ chat session ◄──── session.send ───── Ternleaf extension (Node)
- │      │                                   ├─ canvas actions: ternleaf_read, ternleaf_propose,
- │      └─ invoke_canvas_action ──────────► │                  ternleaf_suggest, ternleaf_decline
+ │      │                                   ├─ canvas actions: read, propose, suggest, view page,
+ │      └─ invoke_canvas_action ──────────► │                  export, open, history, status, guide
+ │                                          ├─ hooks: canvas state with each prompt, guard on file tools
  │                                          ├─ loopback host: token-protected, 127.0.0.1 only
  └─ canvas (webview) ◄── HTTP ─────────────►│   └─ session store: SQLite journal per document
         └─ OpenDoc engine (Rust/WASM) + Ternleaf review pane
@@ -67,21 +72,28 @@ GitHub Copilot app
 
 - **The editor** is [OpenDoc](https://github.com/CasualOffice/opendoc), a Rust/WebAssembly document engine, with a maintained [patch](engine/opendoc.patch). It runs in the canvas. Ternleaf adds the review pane, the selection bubble and the launcher.
 - **The host** is a small Node server on the loopback interface. It serves the editor, knows the documents of the project folder, holds the open document's SQLite project file and publishes each revision in one transaction.
-- **The extension** registers the canvas and four actions with Copilot. When you send a request, it posts a short prompt to your chat session. Copilot reads what you shared through `ternleaf_read` and answers through the other actions.
+- **The extension** registers the canvas, its actions and two hooks with Copilot. A skill with the same guide is in `.github/skills/ternleaf`. When you send a request from the canvas, it posts a short prompt to your chat session. With each chat prompt it tells Copilot what the canvas shows.
 
 | Action | What Copilot can do with it |
 | --- | --- |
-| `ternleaf_read` | Read the passage or the document text that you shared for one request. |
-| `ternleaf_propose` | Offer a replacement for the shared passage, with a reason and up to two alternatives. |
-| `ternleaf_suggest` | Offer a list of changes for a whole-document request. |
+| `ternleaf_guide`, `ternleaf_status` | Learn how to work with the canvas, and what it shows now. |
+| `ternleaf_read` | Read what you shared for a request, or the current text for a chat request. |
+| `ternleaf_propose` | Offer a replacement for a passage, with a reason and up to two alternatives. |
+| `ternleaf_suggest` | Offer a list of changes across the document. |
 | `ternleaf_decline` | Say that nothing needs to change, or that the answer is in the chat. |
+| `ternleaf_view_page` | Look at a page as a picture: layout, tables, charts. |
+| `ternleaf_export` | Write the current revision as a Word file, PDF, Markdown, web page or text into `exports/`. |
+| `ternleaf_documents`, `ternleaf_open_document` | List the Word documents of the project and show one. |
+| `ternleaf_history` | Read the changes that you accepted. |
 
-No action can edit the document.
+No action can edit the document. [Copilot's side of Ternleaf](docs/Agent.md) describes the actions, the hooks and what keeps Copilot from working around the canvas.
 
 ## What Copilot can see
 
-- Copilot reads only what you share: the selected passage, or the document text when you start a whole-document review.
-- Each share is for one request. A request stops being readable when you discard it, reload the canvas or change the document.
+- Copilot reads the document for you: the passage or the text that you share from the canvas, or the text that it needs for a request in the chat.
+- A notice in the canvas tells you each time Copilot reads the text or the selection, looks at a page or exports a file.
+- To keep Copilot to what you share from the canvas, set `"chat": false` in `.ternleaf/canvas.json`.
+- A share from the canvas is for one request. It stops being readable when you discard it, reload the canvas or change the document.
 - The document, its history and its fonts stay on your computer. The host listens on `127.0.0.1` with a new token for each canvas.
 - Text that you share goes to the model through your Copilot session, under your Copilot terms.
 
@@ -93,7 +105,7 @@ You need the GitHub Copilot desktop app with canvas extensions, and Git. The rep
 2. Open the folder in the Copilot app and start a session.
 3. Choose **+ → Canvas → Ternleaf**, or ask Copilot to "open the Ternleaf canvas".
 
-The canvas opens [`examples/welcome-to-ternleaf.docx`](examples/welcome-to-ternleaf.docx), a short introduction with two exercises. [`examples/harbour-library-brief.docx`](examples/harbour-library-brief.docx) is the document in the pictures above.
+The canvas opens [`examples/welcome-to-ternleaf.docx`](examples/welcome-to-ternleaf.docx), a short introduction with three exercises. [`examples/harbour-library-brief.docx`](examples/harbour-library-brief.docx) is the document in the pictures above.
 
 To work on your own documents, put them in the project folder and press Ctrl+O, or ask Copilot to open one, for example "open docs/brief.docx in the Ternleaf canvas". Each document gets its own project file in `.ternleaf/`, and the original file is never changed.
 
@@ -104,6 +116,7 @@ To work on your own documents, put them in the project folder and press Ctrl+O, 
 | Ctrl+O | Open another document |
 | Ctrl+Shift+Space | Open the Review pane for the selection |
 | Ctrl+Enter | Send the instruction |
+| `/ternleaf` in the chat | Start a request with the Ternleaf skill, for example `/ternleaf open docs/brief.docx` |
 
 ## What works today
 
@@ -123,6 +136,7 @@ Ternleaf is strict about what it changes, because an edited DOCX must still open
 | --- | --- |
 | [Install and run](docs/Install.md) | Setup, your own documents, fonts and daily use |
 | [Architecture](docs/Architecture.md) | The parts, the single writer and the path from request to revision |
+| [Copilot's side](docs/Agent.md) | The actions, the context that Copilot gets and what the author sees |
 | [The document engine](docs/Engine.md) | OpenDoc, the patch, the prebuilt engine and how to build it |
 | [Word fidelity](docs/Word-Fidelity.md) | What is verified against Word and how to measure it |
 | [Development](docs/Development.md) | Repository layout, tests and packaging |

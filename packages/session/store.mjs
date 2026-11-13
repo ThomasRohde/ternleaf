@@ -3,9 +3,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { reviewChange } from "./review-change.mjs";
 
 export class Rejected extends Error {
-  constructor(code) {
+  // `detail` is one plain sentence for the reader of the refusal, for example
+  // the number of pages when a page number is out of range.
+  constructor(code, detail) {
     super(code);
     this.code = code;
+    if (detail) this.detail = detail;
   }
 }
 
@@ -66,6 +69,9 @@ export class ProjectStore {
     for (const [name, type] of [["rationale", "TEXT"], ["declined", "INTEGER"], ["created", "INTEGER"],
       ["alternatives", "TEXT"], ["suggestion", "TEXT"]]) {
       if (!columns.has(name)) this.db.exec(`ALTER TABLE reviews ADD COLUMN ${name} ${type}`);
+    }
+    if (!this.db.prepare("PRAGMA table_info(batches)").all().some(column => column.name === "origin")) {
+      this.db.exec("ALTER TABLE batches ADD COLUMN origin TEXT");
     }
   }
 
@@ -151,7 +157,9 @@ export class ProjectStore {
     return { draft: latest ? this.review(latest.id) : null, accepted: accepted?.id ?? null };
   }
 
-  createReview(lease, session, fontHash, { node, start, end, before, revision, prompt, note }) {
+  // `origin` is "chat" when the request came from the Copilot chat and not
+  // from the canvas. The editor shows where a request came from.
+  createReview(lease, session, fontHash, { node, start, end, before, revision, prompt, note, origin }) {
     return this.write(() => {
       const project = this.project();
       this.checkLease(lease, project);
@@ -163,11 +171,24 @@ export class ProjectStore {
         && typeof prompt === "string" && prompt.trim() && prompt.length <= 2000
         && typeof note === "string" && note.length <= 2000, "invalid-selection-or-instructions");
       const scope = { id: randomUUID(), session, fence: lease.fence, documentId: this.documentId(),
-        sourceHash: project.source_hash, fontHash, revision, node, start, end, before };
+        sourceHash: project.source_hash, fontHash, revision, node, start, end, before,
+        ...(origin === "chat" ? { origin } : {}) };
       this.db.prepare("INSERT INTO reviews (id, scope, replacement, prompt, note, accepted, created) VALUES (?, ?, NULL, ?, ?, NULL, ?)")
         .run(scope.id, encode(scope), prompt, note, this.now());
       return scope;
     });
+  }
+
+  // A proposal that starts in the Copilot chat: the request and its answer
+  // arrive together. Both are saved, or neither.
+  createAnsweredReview(lease, session, fontHash, scope, replacement, rationale, alternatives = []) {
+    const created = this.createReview(lease, session, fontHash, { ...scope, origin: "chat" });
+    try { this.submitReview(lease, session, created.id, replacement, rationale, alternatives); }
+    catch (error) {
+      this.db.prepare("DELETE FROM reviews WHERE id = ? AND accepted IS NULL").run(created.id);
+      throw error;
+    }
+    return created;
   }
 
   actionReview(lease, session, id) {
@@ -235,7 +256,7 @@ export class ProjectStore {
   // with suggestions. Each suggestion becomes an ordinary review when the
   // author opens it, so acceptance keeps every check of the review path.
 
-  createBatch(lease, session, { revision, prompt }) {
+  createBatch(lease, session, { revision, prompt, origin }) {
     return this.write(() => {
       const project = this.project();
       this.checkLease(lease, project);
@@ -243,8 +264,8 @@ export class ProjectStore {
       requireThat(typeof prompt === "string" && prompt.trim() && prompt.length <= 2000, "invalid-selection-or-instructions");
       this.db.exec("DELETE FROM suggestions; DELETE FROM batches");
       const id = randomUUID();
-      this.db.prepare("INSERT INTO batches VALUES (?, ?, ?, ?, ?, 'waiting', NULL, ?)")
-        .run(id, session, lease.fence, revision, prompt, this.now());
+      this.db.prepare("INSERT INTO batches (id, session, fence, revision, prompt, state, reason, created, origin) VALUES (?, ?, ?, ?, ?, 'waiting', NULL, ?, ?)")
+        .run(id, session, lease.fence, revision, prompt, this.now(), origin === "chat" ? "chat" : null);
       return { id };
     });
   }
@@ -286,7 +307,7 @@ export class ProjectStore {
 
   batchState(lease) {
     this.checkLease(lease);
-    const batch = this.db.prepare("SELECT id, fence, revision, prompt, state, reason, created FROM batches").get();
+    const batch = this.db.prepare("SELECT id, fence, revision, prompt, state, reason, created, origin FROM batches").get();
     if (!batch) return { batch: null, suggestions: [] };
     return { batch, suggestions: this.db.prepare(
       "SELECT id, node, find, replacement, rationale, state FROM suggestions WHERE batch = ? ORDER BY position").all(batch.id) };
@@ -319,9 +340,10 @@ export class ProjectStore {
         && Number.isSafeInteger(start) && start >= 0 && Number.isSafeInteger(end) && end > start
         && before.length <= 4000 && Buffer.byteLength(before) === end - start
         && typeof note === "string" && note.length <= 2000, "invalid-selection-or-instructions");
-      const batch = this.db.prepare("SELECT prompt FROM batches WHERE id = ?").get(suggestion.batch);
+      const batch = this.db.prepare("SELECT prompt, origin FROM batches WHERE id = ?").get(suggestion.batch);
       const scope = { id: randomUUID(), session, fence: lease.fence, documentId: this.documentId(),
-        sourceHash: project.source_hash, fontHash, revision, node, start, end, before };
+        sourceHash: project.source_hash, fontHash, revision, node, start, end, before,
+        ...(batch?.origin === "chat" ? { origin: "chat" } : {}) };
       this.db.prepare("DELETE FROM reviews WHERE accepted IS NULL").run();
       this.db.prepare("INSERT INTO reviews (id, scope, replacement, prompt, note, accepted, created, rationale, suggestion) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)")
         .run(scope.id, encode(scope), suggestion.replacement, batch?.prompt ?? "", note, this.now(), suggestion.rationale, id);
@@ -335,8 +357,8 @@ export class ProjectStore {
     this.checkLease(lease);
     return this.db.prepare("SELECT id FROM reviews WHERE accepted IS NOT NULL ORDER BY accepted").all()
       .map(({ id }) => {
-        const { accepted, before, replacement, prompt, note, rationale, created } = this.review(id);
-        return { id, revision: accepted, before, replacement, prompt, note, rationale, created };
+        const { accepted, before, replacement, prompt, note, rationale, created, origin } = this.review(id);
+        return { id, revision: accepted, before, replacement, prompt, note, rationale, created, ...(origin ? { origin } : {}) };
       });
   }
 

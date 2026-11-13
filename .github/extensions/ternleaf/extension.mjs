@@ -1,61 +1,59 @@
+// The Copilot side of Ternleaf. This file joins the Copilot session and
+// connects it to the parts in apps/:
+//   - the canvas: one loopback host per open canvas instance
+//   - the actions that Copilot calls on a canvas (apps/agent/actions.mjs)
+//   - the hooks that give Copilot the state of the canvas with each prompt
+//     and keep it from working around the canvas (apps/agent/context.mjs)
+// The guide for Copilot is also a skill: .github/skills/ternleaf/SKILL.md.
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CanvasError, createCanvas, joinSession } from "@github/copilot-sdk/extension";
+import { actions } from "../../../apps/agent/actions.mjs";
+import { promptContext, toolAdvice } from "../../../apps/agent/context.mjs";
+import { canvasPrompt } from "../../../apps/agent/guide.mjs";
 import { ProjectError, createWorkspace } from "../../../apps/host/project.mjs";
 import { startHost } from "../../../apps/host/serve.mjs";
 import { Rejected } from "../../../packages/session/store.mjs";
-import { forAgent } from "../../../packages/session/messages.mjs";
+import { refusalForAgent } from "../../../packages/session/messages.mjs";
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-const instances = new Map();
-const requestId = { type: "string", format: "uuid", description: "The request ID from the Ternleaf prompt." };
+const canvasId = "ternleaf";
+const instances = new Map();   // Canvas instance ID → loopback host.
+const opening = new Set();     // Instances inside an open call.
+const state = { briefed: false, advised: false };
 let session;
 const sessionReady = Promise.withResolvers();
+const joined = async () => session ?? sessionReady.promise;
 
-// Run one action against the canvas instance. A refusal from the session
-// store becomes an instruction that the agent can act on.
-function action(run) {
-  return ({ instanceId, input }) => {
-    const host = instances.get(instanceId);
-    if (!host) throw new CanvasError("canvas-closed", "This Ternleaf canvas is closed. Tell the author to open it again.");
-    try { return run(host, input); }
-    catch (error) {
-      if (error instanceof Rejected) throw new CanvasError(error.code, forAgent(error.code));
-      throw error;
-    }
-  };
+// A refusal becomes one sentence that tells Copilot what to do next.
+function refuse(error) {
+  if (error instanceof CanvasError) return error;
+  if (error instanceof ProjectError) return new CanvasError("project", error.message);
+  if (error instanceof Rejected) return new CanvasError(error.code, refusalForAgent(error));
+  return error;
 }
 
-// The prompt is visible in the chat, so it is short. The rules for the answer
-// come back from ternleaf_read.
-const prompt = (instanceId, id, scope) => [
-  scope === "document"
-    ? "Ternleaf: the author shares the document text and asks for a review with suggestions."
-    : "Ternleaf: the author shares a selected passage and asks for a revision.",
-  `Call ternleaf_read with invoke_canvas_action on canvas instance ${JSON.stringify(instanceId)}, requestId ${JSON.stringify(id)}. Then follow the reply field of the result.`,
-].join("\n");
-
-const rules = {
-  passage: [
-    "Write the replacement for exactly the returned text. Keep its language, facts and voice unless the instructions say otherwise.",
-    "Give plain text for one paragraph: no line breaks, tabs, markup or surrounding quotation marks, at most 4,000 characters.",
-    "Call ternleaf_propose with the replacement and a rationale of one sentence. When the instructions leave real choices open, add one or two alternatives that differ in a useful way.",
-    "If the text needs no change, or the instructions cannot apply to it, call ternleaf_decline with the reason.",
-    "The author accepts or discards the proposal in the canvas. Never apply an edit yourself. Then reply in the chat with one short sentence.",
-  ].join(" "),
-  document: [
-    "Review the paragraphs against the instructions. Call ternleaf_suggest once with the changes that matter, at most 60, in document order.",
-    "Each suggestion names a paragraph number, a find text and a replacement. Copy the find text exactly from that paragraph. Make it short, a few words to one sentence, and long enough to occur only once in the paragraph. Keep it inside text with the same formatting when you can. No line breaks or tabs.",
-    "Give each suggestion a rationale of one short sentence.",
-    "If the instructions ask a question and not for changes, answer in the chat and call ternleaf_decline with the reason 'Answered in the chat.' If nothing needs to change, call ternleaf_decline and say so.",
-    "The author reviews each suggestion in the canvas. Never apply an edit yourself. Then reply in the chat with one short sentence.",
-  ].join(" "),
+// Run one action against its canvas instance.
+const handler = run => async ({ instanceId, input }) => {
+  const host = instances.get(instanceId);
+  if (!host) throw new CanvasError("canvas-closed", refusalForAgent({ code: "canvas-closed" }));
+  try { return await run(host, input ?? {}); }
+  catch (error) { throw refuse(error); }
 };
 
+// The canvas tab shows the name of the document. When the author opens
+// another document in the canvas, ask Copilot to open the same instance
+// again: that updates the title and changes nothing else.
+function retitle(instanceId) {
+  if (opening.has(instanceId)) return;
+  void joined().then(joinedSession => joinedSession.rpc.canvas.open({ canvasId, instanceId }))
+    .catch(() => { /* The title is a convenience. */ });
+}
+
 const canvas = createCanvas({
-  id: "ternleaf",
+  id: canvasId,
   displayName: "Ternleaf",
-  description: "Write and revise a local Word document (DOCX). The author shares a selected passage or the document text and asks for changes, then reviews each proposal before it changes the document.",
+  description: "Write, review and revise a Word document (.docx) with the author: read the current text, look at pages, propose changes that the author accepts or discards, and export files. Call the ternleaf_guide action first.",
   icon: "icon.svg",
   // Copilot often opens a canvas with no input at all, so null is valid too.
   inputSchema: {
@@ -67,78 +65,10 @@ const canvas = createCanvas({
       },
     },
   },
-  actions: [
-    {
-      name: "ternleaf_read",
-      description: "Read what the author shared from this Ternleaf canvas for one request: a selected passage or the document text, with the author's instructions and the rules for the answer.",
-      inputSchema: { type: "object", properties: { requestId }, required: ["requestId"], additionalProperties: false },
-      handler: action((host, input) => {
-        const shared = host.readReview(input.requestId);
-        return { ...shared, reply: shared.scope === "document" ? rules.document : rules.passage };
-      }),
-    },
-    {
-      name: "ternleaf_propose",
-      description: "Submit replacement text for the shared passage. The author reviews it in the canvas. This action cannot apply an edit.",
-      inputSchema: {
-        type: "object", additionalProperties: false,
-        properties: {
-          requestId,
-          replacement: { type: "string", description: "The full replacement for the shared text. Plain text, one paragraph." },
-          rationale: { type: "string", maxLength: 600, description: "One sentence for the author: what changed and why." },
-          alternatives: {
-            type: "array", maxItems: 2, items: { type: "string" },
-            description: "Optional. One or two other full replacements for the author to choose from.",
-          },
-        },
-        required: ["requestId", "replacement"],
-      },
-      handler: action((host, input) => ({
-        ...host.submitProposal(input.requestId, input.replacement, input.rationale, input.alternatives),
-        next: "The proposal is in the canvas for the author's review. Do not apply it. Reply in the chat with one short sentence.",
-      })),
-    },
-    {
-      name: "ternleaf_suggest",
-      description: "Answer a whole-document request with a list of suggested changes. The author reviews each one in the canvas. This action cannot apply an edit.",
-      inputSchema: {
-        type: "object", additionalProperties: false,
-        properties: {
-          requestId,
-          suggestions: {
-            type: "array", minItems: 1, maxItems: 60,
-            items: {
-              type: "object", additionalProperties: false,
-              properties: {
-                paragraph: { type: "integer", minimum: 1, description: "The paragraph number from ternleaf_read." },
-                find: { type: "string", description: "Text to replace, copied exactly from that paragraph. It must occur once." },
-                replacement: { type: "string", description: "The new text for the find text." },
-                rationale: { type: "string", maxLength: 600, description: "One short sentence for the author." },
-              },
-              required: ["paragraph", "find", "replacement"],
-            },
-          },
-        },
-        required: ["requestId", "suggestions"],
-      },
-      handler: action((host, input) => ({
-        ...host.submitSuggestions(input.requestId, input.suggestions),
-        next: "The kept suggestions are in the canvas for the author's review. Do not apply them. Reply in the chat with one short sentence.",
-      })),
-    },
-    {
-      name: "ternleaf_decline",
-      description: "Answer that nothing needs to change, that the instructions cannot apply, or that the answer is in the chat. The author sees the reason.",
-      inputSchema: {
-        type: "object", additionalProperties: false,
-        properties: { requestId, reason: { type: "string", maxLength: 600, description: "One or two sentences for the author." } },
-        required: ["requestId", "reason"],
-      },
-      handler: action((host, input) => host.declineProposal(input.requestId, input.reason)),
-    },
-  ],
+  actions: actions.map(({ name, description, inputSchema, run }) => ({ name, description, inputSchema, handler: handler(run) })),
   async open({ instanceId, input, session: context }) {
     let host = instances.get(instanceId);
+    opening.add(instanceId);
     try {
       if (host) {
         // The canvas is open already. A path asks it to show that document.
@@ -147,7 +77,8 @@ const canvas = createCanvas({
         const workspace = createWorkspace({ project, workingDirectory: context?.workingDirectory });
         const start = (settings, restart = false) => startHost({
           ...settings, workspace, restart, port: workspace.port,
-          askAgent: async (id, scope) => (session ?? await sessionReady.promise).send({ prompt: prompt(instanceId, id, scope) }),
+          askAgent: async (id, scope) => (await joined()).send({ prompt: canvasPrompt(instanceId, id, scope) }),
+          onDocument: () => retitle(instanceId),
         });
         if (input?.document) host = await start(workspace.resolve(input.document));
         else {
@@ -162,11 +93,8 @@ const canvas = createCanvas({
         }
         instances.set(instanceId, host);
       }
-    } catch (error) {
-      if (error instanceof ProjectError) throw new CanvasError("project", error.message);
-      if (error instanceof Rejected) throw new CanvasError(error.code, forAgent(error.code));
-      throw error;
-    }
+    } catch (error) { throw refuse(error); }
+    finally { opening.delete(instanceId); }
     return { title: host.name, url: host.url };
   },
   async onClose({ instanceId }) {
@@ -176,7 +104,23 @@ const canvas = createCanvas({
   },
 });
 
-session = await joinSession({ canvases: [canvas] });
+// A hook must never break a prompt or a tool call.
+const safely = run => async input => {
+  try { return await run(input); } catch { return undefined; }
+};
+
+session = await joinSession({
+  canvases: [canvas],
+  hooks: {
+    // Copilot learns what the canvas shows with every prompt, so it does not
+    // have to search for it.
+    onUserPromptSubmitted: safely(() => {
+      const additionalContext = promptContext(instances, state);
+      return additionalContext ? { additionalContext } : undefined;
+    }),
+    onPreToolUse: safely(input => toolAdvice(input, { project, instances, state })),
+  },
+});
 sessionReady.resolve(session);
 // A turn that ends without an answer leaves the author waiting. Tell each
 // open canvas, so the editor can say so.

@@ -17,6 +17,7 @@ Ternleaf aims to be a document studio for substantial writing: precise pages, st
 - Ask Copilot to revise a selected passage, with quick requests or an instruction.
 - Review the changed words, the reason and the page before and after. Choose between options, or edit the proposal.
 - Review a whole document through a queue of suggestions.
+- Ask in the chat: Copilot reads the current text and the pages through the canvas, and its proposals come to the same review.
 - Every edit is a saved revision with undo, redo, recovery after a reload and an edition note.
 - Export a DOCX, guarded against lost content, or a PDF, Markdown, web page or plain text.
 

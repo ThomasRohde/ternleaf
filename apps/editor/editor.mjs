@@ -299,6 +299,128 @@ export function attachTernleaf(editor) {
       }
     }, 800);
     setInterval(watchSelection, 200);
+    setInterval(() => void pulse(), 1000);
+  }
+
+  // ---- Copilot's side: requests that begin in the chat -------------------
+  // The host cannot read a document. Only the engine in this page knows the
+  // text and the pages. With each pulse the page reports a few facts, and it
+  // does the jobs that Copilot's actions queue: read, page and export.
+  const jobsDone = new Set();
+  const told = new Map();   // Notices already shown, with the time.
+  let pulsing = false;
+  let chatStamp;
+  let counted = { revision: -1, words: null };
+  // The author sees what Copilot takes from the canvas. One notice of a kind
+  // every 20 seconds is enough.
+  function tell(text) {
+    if (Date.now() - (told.get(text) ?? 0) < 20_000) return;
+    told.set(text, Date.now());
+    toast(text);
+  }
+  const refusal = (code, detail) => Object.assign(new Error(code), { code, detail });
+  function wordTotal() {
+    if (counted.revision !== journal.length) {
+      let words = null;
+      try { const stats = editor.doc.documentStats(); words = stats.words; stats.free(); } catch { /* A count is optional. */ }
+      counted = { revision: journal.length, words };
+    }
+    return counted.words;
+  }
+  const listLength = read => { try { return (JSON.parse(read()) ?? []).length; } catch { return 0; } };
+
+  function readForCopilot() {
+    const doc = editor.doc;
+    const paragraphs = JSON.parse(doc.searchableText()).filter(([, text]) => text.trim());
+    let outline = [];
+    try {
+      outline = Array.from(doc.documentOutline()).map(row => String(row).split("\t"))
+        .filter(parts => parts.length >= 4).map(([level, node]) => ({ level: Number(level), node }));
+    } catch { /* A document without headings has no outline. */ }
+    tell("Copilot read the document text.");
+    return { revision: journal.length, paragraphs, outline, pages: doc.pageCount, words: wordTotal(),
+      comments: listLength(() => doc.listComments()), trackedChanges: listLength(() => doc.listRevisions()) };
+  }
+
+  function pageForCopilot(page) {
+    const doc = editor.doc;
+    const pages = doc.pageCount;
+    if (page > pages) throw refusal("page-out-of-range", `The document has ${pages} ${pages === 1 ? "page" : "pages"}.`);
+    const bitmap = doc.renderPage(page - 1, 120);
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.widthPx;
+      canvas.height = bitmap.heightPx;
+      canvas.getContext("2d").putImageData(new ImageData(bitmap.rgba, bitmap.widthPx, bitmap.heightPx), 0, 0);
+      tell(`Copilot looked at page ${page}.`);
+      return { png: canvas.toDataURL("image/png").split(",")[1], pages, revision: journal.length,
+        width: canvas.width, height: canvas.height };
+    } finally { bitmap.free(); }
+  }
+
+  const exportFormats = { docx: ["org.openxmlformats.wordprocessingml.document", "a Word file"],
+    pdf: ["application.pdf", "a PDF"], markdown: ["text.markdown", "Markdown"], html: ["text.html", "a web page"],
+    text: ["text.plain", "plain text"] };
+  function exportForCopilot(format) {
+    const [id, label] = exportFormats[format] ?? [];
+    if (!id) throw refusal("invalid-request");
+    const word = format === "docx";
+    const output = editor.doc.exportAs(id, !word ? "semantic" : journal.length ? "preserve_when_safe" : "exact_if_unchanged");
+    try {
+      if (word) {
+        // The same check as the author's own Word export. Only the author
+        // can accept a loss.
+        try { validateDocxExport(output.reportJson, acceptedLosses); }
+        catch (error) {
+          throw error.decidable ? refusal("export-needs-author")
+            : refusal("export-refused", `It would lose: ${error.features.join(", ")}.`);
+        }
+      }
+      const content = output.bytes;
+      let binary = "";
+      for (let at = 0; at < content.length; at += 0x8000) binary += String.fromCharCode(...content.subarray(at, at + 0x8000));
+      tell(`Copilot exported revision ${journal.length} as ${label}.`);
+      return { bytes: btoa(binary), revision: journal.length };
+    } finally { output.free(); }
+  }
+
+  async function doJob(job) {
+    let answer;
+    try {
+      if (!editor.doc) throw refusal("canvas-not-ready");
+      const result = job.kind === "read" ? readForCopilot()
+        : job.kind === "page" ? pageForCopilot(job.page)
+        : job.kind === "export" ? exportForCopilot(job.format)
+        : (() => { throw refusal("invalid-request"); })();
+      answer = { result };
+    } catch (error) {
+      answer = { error: error.code ?? "canvas-error", detail: error.code ? error.detail : String(error.message ?? error) };
+    }
+    try { await call("job", { lease, id: job.id, ...answer }); } catch { /* The action reports a canvas that did not answer. */ }
+  }
+
+  async function pulse() {
+    if (!lease || blocked || pulsing || !editor.doc) return;
+    pulsing = true;
+    try {
+      const selection = live ?? (stillThere(captured) ? captured : null);
+      const state = await call("pulse", { lease, live: { revision: journal.length, pages: editor.doc.pageCount,
+        words: wordTotal(), suggesting: Boolean(editor.doc.trackRevisions), selection } });
+      const changed = chatStamp !== undefined && state.stamp !== chatStamp;
+      chatStamp = state.stamp;
+      for (const line of state.notices ?? []) tell(String(line).slice(0, 200));
+      for (const job of state.jobs) {
+        if (jobsDone.has(job.id)) continue;
+        jobsDone.add(job.id);
+        void doJob(job);
+      }
+      if (changed) {
+        // Copilot put a proposal or suggestions in the canvas from the chat.
+        syncBatch(await call("suggestions", { lease }));
+        await syncReviews(await call("reviews", { lease }));
+      }
+    } catch { /* The heartbeat reports a lost canvas. A lost pulse is tried again. */ }
+    finally { pulsing = false; }
   }
 
   // ---- Selection --------------------------------------------------------
@@ -571,10 +693,14 @@ export function attachTernleaf(editor) {
 
   // ---- Whole-document review --------------------------------------------
   let advanceAfter = null;  // The review whose acceptance opens the next suggestion.
+  let batchOrigin = "canvas";
 
   function syncBatch(state, opening = false) {
-    const answered = batch?.state === "waiting" && state.batch?.state !== "waiting";
+    // An answer from the chat arrives complete: there was no waiting state.
+    const arrived = Boolean(state.batch) && state.batch.id !== batch?.id && state.batch.state !== "waiting";
+    const answered = arrived || (batch?.state === "waiting" && state.batch?.state !== "waiting");
     batch = state.batch;
+    batchOrigin = state.origin === "chat" ? "chat" : "canvas";
     suggestions = state.suggestions;
     if (state.unanswered) batchStopped = "Copilot finished without suggestions. Read the chat for the reason.";
     if (batch && batch.state === "waiting" && batch.fence !== lease.fence) {
@@ -732,6 +858,7 @@ export function attachTernleaf(editor) {
     part("queue-title").textContent = batch.state === "declined" ? "Copilot suggested no changes"
       : open ? `${open} ${open === 1 ? "suggestion" : "suggestions"} to review` : "All suggestions reviewed";
     part("queue-prompt").textContent = batch.prompt;
+    part("queue-prompt").dataset.origin = batchOrigin;
     part("queue-reason").hidden = batch.state !== "declined";
     part("queue-reason").textContent = batch.reason ?? "";
     part("queue-list").replaceChildren(...suggestions.map(item => {
@@ -808,6 +935,7 @@ export function attachTernleaf(editor) {
     }
     if (current === "proposal") {
       part("asked").textContent = draft.prompt;
+      part("asked").dataset.origin = draft.origin === "chat" || (draft.suggestion && batchOrigin === "chat") ? "chat" : "canvas";
       const adopted = Boolean(draft.suggestion);
       const position = suggestions.findIndex(item => item.id === draft.suggestion);
       part("step").hidden = position < 0;

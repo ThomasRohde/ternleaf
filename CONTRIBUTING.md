@@ -23,7 +23,8 @@ To run the canvas, open the repository folder in the Copilot app. [Install and r
 These rules are the reason Ternleaf can be trusted with a document. A change must keep them.
 
 - **Copilot cannot edit.** A canvas action reads what the author shared or records a proposal. Only the author's acceptance publishes a change.
-- **Copilot reads only what the author shares.** Do not add an action that reads the document without a request from the author.
+- **Copilot reads for the author, and the author knows.** Copilot reads the document for a request from the canvas or from the chat. Each read shows a notice in the canvas, and `"chat": false` turns reads from the chat off. Do not add a read that the author cannot see or cannot turn off.
+- **Copilot never has to guess.** Every action and every input field has a description, and every refusal says what to do next. An agent that has to read the source to use Ternleaf has found a defect.
 - **One publication path.** Every change goes through `ProjectStore.publish`, with the writer lease, the expected revision and the engine frame checked together.
 - **No silent loss.** Export must refuse a DOCX when the engine reports lost source content.
 - **Keep the engine patch small.** Change the engine in a pinned checkout and carry the change in [`engine/opendoc.patch`](engine/opendoc.patch). [The document engine](docs/Engine.md) explains how.

@@ -15,7 +15,9 @@ GitHub Copilot app
 
 ## The parts
 
-**Extension.** [`extension.mjs`](../.github/extensions/ternleaf/extension.mjs) joins the Copilot session, declares the canvas and its four actions, and starts one host for each canvas instance. It sends a short prompt to the chat when the author makes a request, and it turns a refusal from the store into an instruction that the agent can act on. It contains no document logic.
+**Extension.** [`extension.mjs`](../.github/extensions/ternleaf/extension.mjs) joins the Copilot session, declares the canvas, its actions and two hooks, and starts one host for each canvas instance. It sends a short prompt to the chat when the author makes a request, and it turns a refusal from the store into an instruction that the agent can act on. It contains no document logic.
+
+**Agent surface.** [`apps/agent`](../apps/agent) holds what Copilot can do and what it is told: the actions, the guide, the context for each prompt and the advice for tool calls that go around the canvas. [Copilot's side of Ternleaf](Agent.md) describes it.
 
 **Host.** [`serve.mjs`](../apps/host/serve.mjs) is an HTTP server on `127.0.0.1`. It serves the engine and the shell, and it exposes the session store to the editor. Every API call needs the bearer token of that canvas, which is new for each canvas, and the host checks the `Host` and `Origin` headers. The host asks for the same port for a project each time, so the editor keeps one origin and with it the author's settings. If that port is taken, any free port works.
 
@@ -60,12 +62,27 @@ A whole-document request works the same way with one difference. The editor send
 
 | Action | Effect |
 | --- | --- |
-| `ternleaf_read` | Returns what the author shared for one request. |
+| `ternleaf_guide`, `ternleaf_status`, `ternleaf_documents`, `ternleaf_history` | Return facts. They change nothing. |
+| `ternleaf_read` | Returns what the author shared for one request, or the current text for a request from the chat. |
+| `ternleaf_view_page` | Returns a picture of one page. |
 | `ternleaf_propose` | Saves a proposal for the author to review. |
 | `ternleaf_suggest` | Saves a list of suggestions for the author to review. |
 | `ternleaf_decline` | Saves a reason for the author. |
+| `ternleaf_export` | Writes a copy of the current revision into the `exports` folder. |
+| `ternleaf_open_document` | Shows another document of the project in the canvas. |
 
-No action applies an edit, reads the document without a request, or reaches the file system. The author's acceptance in the canvas is the only way to a new revision.
+No action applies an edit. The author's acceptance in the canvas is the only way to a new revision. The only file that an action writes is an export, and the only folder is `exports`.
+
+## A request from the chat
+
+The author can also ask in the chat. Then no request exists when Copilot starts, and the host must get the text from the editor, because only the engine there can read the document.
+
+1. Once a second the editor sends a pulse with the revision, the page and word counts and the selection. The host keeps these facts for `ternleaf_status` and for the context of the next prompt.
+2. `ternleaf_read`, `ternleaf_view_page` and `ternleaf_export` queue a job. The answer to the next pulse carries it. The editor does the job with the engine, shows the author a notice and posts the result.
+3. `ternleaf_suggest` without a request ID checks each suggestion against the text that Copilot read, at the same revision. `ternleaf_propose` without a request ID checks that the text Copilot names is the text that is selected now. The host then saves the request and its answer together, with the origin "chat".
+4. The host raises a counter. The editor sees it in the next pulse and loads the proposal or the suggestions. From here the path is the same as steps 6 and 7 above.
+
+An answer from the chat is refused while the author has a proposal or open suggestions that are not decided. A project can turn the whole path off with `"chat": false` in `.ternleaf/canvas.json`.
 
 ## Export
 

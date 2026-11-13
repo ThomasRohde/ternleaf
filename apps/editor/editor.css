@@ -316,6 +316,7 @@
 /* ---- Waiting ------------------------------------------------------- */
 .tl-asked { font-weight: 500; }
 .tl-asked::before { content: "You asked: "; color: var(--muted); font-weight: 400; }
+.tl-asked[data-origin="chat"]::before { content: "From the chat: "; }
 .tl-progress { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); }
 .tl-pulse {
   flex: none;

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { copyFile, mkdir, readdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { actions } from "../apps/agent/actions.mjs";
+import { promptContext } from "../apps/agent/context.mjs";
 import { createWorkspace } from "../apps/host/project.mjs";
 import { startHost } from "../apps/host/serve.mjs";
 
@@ -253,10 +255,73 @@ try {
   await close(page);
   page = await openProject();
   await shows(page, "First.docx");
+
+  // Copilot works from the chat, with no request from the canvas: it reads
+  // the text, looks at a page, exports files, and sends suggestions and a
+  // proposal that the author reviews.
+  const act = name => actions.find(item => item.name === name).run;
+  const until = async (check, what) => {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (await check()) return;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw new Error("Timed out: " + what);
+  };
+  await until(() => host.status().canvas.ready, "the canvas reports to the host");
+  assert.deepEqual(host.status().document, { name: "First.docx", path: "docs/First.docx", revision: 1 });
+  const text = await act("ternleaf_read")(host, {});
+  const line = text.paragraphs.find(item => item.text === "Alpha KEEP omegaZ");
+  assert(line, JSON.stringify(text.paragraphs.slice(0, 4)));
+  assert.deepEqual([text.revision, text.total >= 2, text.pages >= 1, text.words > 3], [1, true, true, true]);
+  await page.getByText("Copilot read the document text.").waitFor();
+  const picture = await act("ternleaf_view_page")(host, { page: 1 });
+  const png = Buffer.from(picture.binaryResultsForLlm[0].data, "base64");
+  assert.deepEqual([png.subarray(1, 4).toString(), png.length > 4000, JSON.parse(picture.textResultForLlm).width > 600], ["PNG", true, true]);
+  await writeFile(join(out, "copilot-page-1.png"), png);
+  await assert.rejects(act("ternleaf_view_page")(host, { page: 99 }), error => error.code === "page-out-of-range" && /The document has \d+ page/.test(error.detail));
+  for (const [format, start] of [["markdown", "Alpha"], ["text", ""], ["html", "<"], ["pdf", "%PDF"], ["docx", "PK"]]) {
+    const exported = await act("ternleaf_export")(host, { format });
+    const content = await readFile(join(folder, exported.path));
+    assert.deepEqual([exported.revision, content.length === exported.bytes, content.subarray(0, 40).toString("latin1").trimStart().startsWith(start)],
+      [1, true, true], format + ": " + content.subarray(0, 40).toString("latin1"));
+    if (format === "markdown") assert(content.toString().includes("Alpha KEEP omegaZ"));
+  }
+  const sent = act("ternleaf_suggest")(host, { instructions: "Use HOLD, not KEEP.", revision: text.revision, suggestions: [
+    { paragraph: line.paragraph, find: "KEEP", replacement: "HOLD", rationale: "The author asked for HOLD." },
+    { paragraph: line.paragraph, find: "absent", replacement: "x" }] });
+  assert.deepEqual([sent.suggested, sent.refused.length], [1, 1]);
+  await page.getByText("1 suggestion to review").waitFor();
+  await page.locator('#ternleaf-panel [data-part=queue-prompt][data-origin=chat]').filter({ hasText: "Use HOLD, not KEEP." }).waitFor();
+  await page.locator("#ternleaf-panel [data-part=queue-list]").getByRole("button", { name: "Review" }).click();
+  await page.locator('#ternleaf-panel [data-part=asked][data-origin=chat]').waitFor();
+  await page.getByRole("button", { name: "Accept change" }).click();
+  await until(async () => (await state(page)).head === 2, "the accepted suggestion is revision 2");
+  assert(await hasText(page, "Alpha HOLD omegaZ"));
+  // The document changed, so the text that Copilot read is out of date.
+  assert.throws(() => act("ternleaf_suggest")(host, { instructions: "Again.", revision: 1,
+    suggestions: [{ paragraph: line.paragraph, find: "HOLD", replacement: "KEEP" }] }), /stale-document/);
+  await select();
+  await until(() => host.status().canvas.selection?.text === "Alpha HOLD omegaZ", "the selection reaches the host");
+  const proposed = act("ternleaf_propose")(host, { instructions: "End with Y.", text: "Alpha HOLD omegaZ",
+    replacement: "Alpha HOLD omegaY", rationale: "The last letter is now Y." });
+  await page.locator("#ternleaf-panel ins").filter({ hasText: /^Y$/ }).waitFor();
+  await page.locator('#ternleaf-panel [data-part=asked][data-origin=chat]').filter({ hasText: "End with Y." }).waitFor();
+  await page.getByText("The last letter is now Y.").waitFor();
+  await page.getByRole("button", { name: "Accept change" }).click();
+  await until(async () => (await state(page)).head === 3, "the accepted proposal is revision 3");
+  assert(await hasText(page, "Alpha HOLD omegaY"));
+  const told = promptContext(new Map([["main", host]]), { briefed: true });
+  assert.match(told, /shows "docs\/First.docx" \(revision 3, /);
+  assert.match(told, /the author accepted "KEEP" → "HOLD" \(revision 2\); accepted "Alpha HOLD omegaZ" → "Alpha HOLD omegaY" \(revision 3\)/);
+  const past = act("ternleaf_history")(host, {});
+  assert.deepEqual(past.changes.slice(-2).map(item => [item.revision, item.from, item.instructions, item.after]),
+    [[2, "chat", "Use HOLD, not KEEP.", "HOLD"], [3, "chat", "End with Y.", "Alpha HOLD omegaY"]]);
+  assert.equal(past.changes.at(-1).before, "Alpha HOLD omegaZ");
+  assert.equal(typeof proposed.requestId, "string");
   await close(page);
 
   console.log(JSON.stringify({ synchronousAdmissionMs: admission }));
-  console.log("Browser selection review, saved draft, stale action rejection after reload, lost-response recovery, decline, discard, alternatives, author edit, document review, export, undo, retry, redo and project documents passed.");
+  console.log("Browser selection review, saved draft, stale action rejection after reload, lost-response recovery, decline, discard, alternatives, author edit, document review, export, undo, retry, redo, project documents and Copilot's work from the chat passed.");
 } finally {
   await browser.close();
   await host?.close();

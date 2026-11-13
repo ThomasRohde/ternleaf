@@ -15,7 +15,7 @@ Ternleaf was developed and tested on Windows. The engine and the extension are p
 2. Open the folder in the Copilot app and start a session.
 3. Choose **+ → Canvas → Ternleaf**, or ask Copilot to "open the Ternleaf canvas".
 
-The canvas opens [`examples/welcome-to-ternleaf.docx`](../examples/welcome-to-ternleaf.docx), a short introduction to the canvas. It has two exercises: one for a selected passage and one for a whole-document review. [`scripts/make-welcome.py`](../scripts/make-welcome.py) writes that document.
+The canvas opens [`examples/welcome-to-ternleaf.docx`](../examples/welcome-to-ternleaf.docx), a short introduction to the canvas. It has three exercises: a selected passage, a whole-document review and a request in the chat. [`scripts/make-welcome.py`](../scripts/make-welcome.py) writes that document.
 
 If the canvas is not in the list, the app could not load the extension. Run `npm ci --prefix .github/extensions/ternleaf` and start a new session. This installs the Copilot SDK next to the extension for an app version that does not supply it.
 
@@ -48,6 +48,7 @@ To continue in Word and come back, export from Ternleaf, edit the export in Word
 | `source` | The document that opens in a project where no document was opened before. |
 | `state` | The SQLite project file for `source`. Set both or neither. |
 | `engine` | The folder of the OpenDoc web application. The default is `engine/prebuilt/webapp`. |
+| `chat` | Set it to `false` to keep Copilot to the requests that you send from the canvas. Copilot then cannot read the document for a request in the chat. |
 
 Paths are relative to the project folder or absolute.
 
@@ -76,6 +77,7 @@ The editor's settings, such as the theme, the language, your name for comments a
 
 - **Ask in place.** Select text in one paragraph. Choose a quick request in the bubble, or choose **Ask Copilot** and write an instruction. Ctrl+Enter sends it. Ctrl+Shift+Space opens the Review pane.
 - **Review.** Compare the changed words and the page before and after. Switch between the options if Copilot gave more than one. **Edit the text** changes the proposal yourself. **Accept change** saves a revision. **Discard** and **Ask again** leave the document as it is.
+- **Ask in the chat.** Type your request in the Copilot chat, for example "Proofread the document", "Make the selected sentence more formal" or "Export a PDF". Copilot reads the current text through the canvas, and a notice tells you when it does. Its proposals come to the Review pane with the label **From the chat**. An export goes into the `exports` folder of the project. You can start a request with `/ternleaf`, for example `/ternleaf open docs/brief.docx`.
 - **Whole document.** Choose **Whole document**, then a quick review or your own instruction. **Review** opens a suggestion as a proposal. **Accept change** goes to the next one, and **Skip** leaves the text as it is.
 - **History.** The History tab lists every revision. Undo and redo are revisions too. Ternleaf saves each change at once, so there is nothing to save by hand: Ctrl+S confirms the saved revision.
 - **Export.** **Export DOCX** downloads the current revision as a Word file. The arrow next to it offers PDF, Markdown, web page and plain text. If a Word export would leave out a known legacy part of the source, Ternleaf explains it and asks first. If it would lose anything else, Ternleaf refuses the Word export, and the other formats still work.

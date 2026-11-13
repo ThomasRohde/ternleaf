@@ -5,8 +5,10 @@
 | Path | Contents |
 | --- | --- |
 | [`.github/extensions/ternleaf`](../.github/extensions/ternleaf) | The Copilot canvas extension |
+| [`.github/skills/ternleaf`](../.github/skills/ternleaf) | The Copilot skill: the guide for the agent, written by `scripts/write-skill.mjs` |
 | [`apps/editor`](../apps/editor) | The Ternleaf shell that runs in the canvas |
 | [`apps/host`](../apps/host) | The loopback host and document selection |
+| [`apps/agent`](../apps/agent) | What Copilot can do and what it is told: actions, guide, prompt context |
 | [`packages/session`](../packages/session) | The SQLite session store, the review rules and the messages |
 | [`engine`](../engine) | The OpenDoc pin, the patch and the prebuilt engine |
 | [`examples`](../examples) | The example document and configuration |
@@ -35,11 +37,11 @@ It prints a URL with the access token. **Ask Copilot** answers "Copilot is not c
 npm test
 ```
 
-They need Node.js 24 and nothing else. They cover the session store (leases, publication, recovery after a killed process, undo and receipts), the review path, alternatives and author edits, whole-document suggestions, the project's documents (listing, the last document, new and added files, a file that changed on disk), the host's document switching over HTTP, the comparison of changed words and the export check.
+They need Node.js 24 and nothing else. They cover the session store (leases, publication, recovery after a killed process, undo and receipts), the review path, alternatives and author edits, whole-document suggestions, the project's documents (listing, the last document, new and added files, a file that changed on disk), the host's document switching over HTTP, every Copilot action with a test that plays the editor, the context for a prompt, the advice for tool calls, the comparison of changed words and the export check.
 
 ### Browser test
 
-[`tests/browser.mjs`](../tests/browser.mjs) drives the real editor and host in Chrome with Playwright and plays the agent through the host's own functions. It covers a request, a saved draft, a reload, a lost reply during acceptance, decline, discard, alternatives, an author edit, a whole-document review, export, undo, retry and redo, and a project with several documents: open, new, add a file and a document that Copilot opens.
+[`tests/browser.mjs`](../tests/browser.mjs) drives the real editor and host in Chrome with Playwright and plays the agent through the host's own functions. It covers a request, a saved draft, a reload, a lost reply during acceptance, decline, discard, alternatives, an author edit, a whole-document review, export, undo, retry and redo, and a project with several documents: open, new, add a file and a document that Copilot opens. The last part is Copilot's work from the chat against the real engine: read, page picture, the five export formats, suggestions and a proposal.
 
 ```powershell
 python -m pip install python-docx==1.2.0 lxml==6.0.2
