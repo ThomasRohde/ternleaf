@@ -206,6 +206,15 @@ test("the store accepts only a frame that does exactly the reviewed change", asy
   assert(!frameDoesChange([del(6, 11), ins(6, "one"), split, ins(0, "two and more", fresh)], node, wide));
   assert(!frameDoesChange([del(6, 11), ins(6, "one"), { SplitParagraph: { at: at(8), new_id: fresh } }, ins(0, "two", fresh)], node, wide));
 
+  // The removal of a whole paragraph: its text goes, and it joins the one before.
+  const gone = reviewChange({ before: "A whole paragraph.", replacement: "", start: 0 });
+  const join = (first, second) => ({ JoinParagraphs: { first, second, properties: null } });
+  assert(frameDoesChange([del(0, 18), join(fresh, node)], node, gone));
+  assert(!frameDoesChange([del(0, 18), join(node, fresh)], node, gone));
+  assert(!frameDoesChange([del(0, 12), join(fresh, node)], node, gone));
+  assert(!frameDoesChange([del(17, 23), join(fresh, node)], node, narrow));
+  assert(!frameDoesChange([del(0, 18), join(fresh, node), join(fresh, "c".repeat(32))], node, gone));
+
   // Suggesting mode: one tracked deletion and one tracked insertion.
   const run = text => ({ type: "run", text });
   const revision = (kind, text) => ({ type: "revision", kind, inlines: [run(text)] });

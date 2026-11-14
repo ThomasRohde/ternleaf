@@ -33,7 +33,7 @@ Select text and a bubble appears below it. Choose **Shorten**, **Clarify** or **
 
 Each proposal shows the changed words, Copilot's reason, and the page before and after. Copilot can offer up to three options. You can edit the text yourself before you accept it, and add an edition note that is saved with the revision.
 
-A proposal can replace a few words, rewrite a paragraph or add new paragraphs. New text keeps the formatting of the text that it replaces.
+A proposal can replace a few words, rewrite a paragraph, add new paragraphs or remove a paragraph. New text keeps the formatting of the text that it replaces.
 
 ### Review the whole document
 
@@ -159,7 +159,7 @@ To work on your own documents, put them in the project folder and press Ctrl+O, 
 Ternleaf is strict about what it changes, because an edited DOCX must still open correctly in Word.
 
 - One document is open in one canvas at a time.
-- A proposal starts inside one paragraph. It can add paragraphs, but it cannot remove or join paragraphs. A change across bold and plain text gets the formatting of the first replaced word, and the review warns you. A change cannot touch a link, a tab or a line break.
+- A proposal starts inside one paragraph. It can add paragraphs and remove a whole paragraph, but it cannot join two paragraphs. A change across bold and plain text gets the formatting of the first replaced word, and the review warns you. A change cannot touch a link, a tab or a line break.
 - Export refuses to write a DOCX if the engine reports that source content would be lost. For one known, small loss it asks you first. PDF, Markdown, web page and plain text export always work.
 - The canvas API of the Copilot SDK is experimental and can change.
 - Ternleaf was developed and tested on Windows.

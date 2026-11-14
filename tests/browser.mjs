@@ -459,6 +459,17 @@ try {
   }
   assert(!(await hasText(page, "Plain start")));
   assert.equal(act("ternleaf_history")(host, {}).changes.at(-1).from, "word");
+  // A proposal that deletes all the text of a paragraph removes the paragraph.
+  const whole = await act("ternleaf_read")(host, {});
+  act("ternleaf_suggest")(host, { instructions: "Remove the middle paragraph.", revision: whole.revision, suggestions: [
+    { paragraph: whole.paragraphs.find(item => item.text === "Middle paragraph stays here.").paragraph,
+      find: "Middle paragraph stays here.", replacement: "", rationale: "Not needed." }] });
+  await page.locator("#ternleaf-panel [data-part=queue-list]").getByRole("button", { name: "Review" }).click();
+  await page.locator("#ternleaf-panel [data-part=removes]").filter({ hasText: "removes the whole paragraph" }).waitFor();
+  await acceptNext(4);
+  assert.deepEqual(await page.evaluate(() => JSON.parse(window.ternleafEditor.doc.searchableText()).map(([, value]) => value)),
+    ["start bold middle plain end of the sentence.", "Final paragraph for a comment."]);
+  assert.equal((await readFile(join(folder, (await act("ternleaf_export")(host, { format: "docx" })).path))).subarray(0, 2).toString(), "PK");
   assert.equal((await readFile(join(folder, word.path))).subarray(0, 2).toString(), "PK");
 
   // Editions: a brief is an edition of a paper. The paper changes, and the

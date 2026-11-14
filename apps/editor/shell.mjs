@@ -136,6 +136,7 @@ export function layout() {
               <button type="button" class="tl-link" data-action="edit">Edit the text</button></p>
           </div>
           <p class="tl-caution" data-part="mixed" hidden>This change replaces text with more than one kind of formatting, for example bold and plain. The new text gets the formatting of the first replaced word. Look at the page after the change.</p>
+          <p class="tl-caution" data-part="removes" hidden>This change removes the whole paragraph.</p>
           <p class="tl-caution" data-part="tracked" hidden>Suggesting mode is on. If you accept, the change goes into the document as a tracked change, for a reader who reviews in Word.</p>
           <p class="tl-rationale" data-part="rationale" hidden><span>Copilot</span> <span data-part="rationale-text"></span></p>
           <div class="tl-preview">

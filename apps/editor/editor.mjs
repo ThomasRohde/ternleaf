@@ -689,8 +689,20 @@ export function attachTernleaf(editor) {
   // Apply a reviewed change to a document as one revision. The store checks
   // the frame that the engine makes, so each way to apply a change has a
   // form that the store knows (frameDoesChange).
+  // A change that deletes all the text of a paragraph removes the paragraph
+  // too, when there is a paragraph before it to join it to. The paragraph
+  // before keeps its own style.
+  function paragraphToJoin(doc, node, change) {
+    if (doc.trackRevisions || change.inserted || change.start !== 0 || !change.end || change.end !== doc.paragraphLength(node)) return null;
+    const all = JSON.parse(doc.searchableText());
+    const index = all.findIndex(([id]) => id === node);
+    return index > 0 ? all[index - 1][0] : null;
+  }
+
   function applyChange(doc, node, change, author = null) {
     const { format, same, off } = checkReviewRun(node, change, doc);
+    const previous = paragraphToJoin(doc, node, change);
+    if (previous) return doc.replaceSelection(previous, doc.paragraphLength(previous), node, change.end, "");
     if (doc.trackRevisions) {
       // Suggesting mode: the change becomes a tracked change, for a reader
       // who reviews in Word.
@@ -783,7 +795,8 @@ export function attachTernleaf(editor) {
     const { node, start, end, before } = candidate;
     if (editor.doc.copyText(node, start, node, end) !== before) throw new Error("The passage changed after this proposal. Discard it, then ask again.");
     const change = reviewChange(candidate);
-    const next = { view: "after", whole: false, mixed: checkReviewRun(node, change).mixed, tracked: Boolean(editor.doc.trackRevisions) };
+    const next = { view: "after", whole: false, mixed: checkReviewRun(node, change).mixed, tracked: Boolean(editor.doc.trackRevisions),
+      removes: Boolean(paragraphToJoin(editor.doc, node, change)) };
     const sample = openDoc(source);
     try {
       for (const font of fonts) sample.registerFont(font);
@@ -1199,6 +1212,7 @@ export function attachTernleaf(editor) {
       part("rationale").hidden = !draft.rationale;
       part("mixed").hidden = !preview?.mixed;
       part("tracked").hidden = !preview?.tracked;
+      part("removes").hidden = !preview?.removes;
       part("rationale-text").textContent = draft.rationale ?? "";
       button("save-note").hidden = note.value === draft.note;
       paintPreview();

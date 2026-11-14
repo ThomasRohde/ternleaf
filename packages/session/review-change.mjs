@@ -22,7 +22,7 @@ export function reviewChange({ before, replacement, start }) {
 // Does an engine frame do exactly the reviewed change? The store asks this
 // before it saves an accepted proposal, so that what the author reviewed is
 // what the document gets. `forward` is the list of operations of the frame.
-// Three forms are valid:
+// Four forms are valid (the fourth is described where it is checked):
 //  1. A deletion and an insertion of text. This is a change inside text of
 //     one formatting.
 //  2. The same, with the new text in parts: text, paragraph breaks, and
@@ -42,6 +42,14 @@ export function frameDoesChange(forward, node, change) {
     const tracked = kind => (state.paragraphs[0].inlines ?? []).filter(inline => inline.type === "revision" && inline.kind === kind).map(text);
     return (!change.inserted || tracked("insertion").includes(change.inserted))
       && (!change.removed || tracked("deletion").includes(change.removed));
+  }
+  // 4. The removal of a whole paragraph: its text is deleted from the first
+  //    character, and the empty paragraph is joined to the one before it.
+  if (ops.length === 2 && ops[1][0] === "JoinParagraphs") {
+    const range = ops[0][0] === "DeleteText" ? ops[0][1]?.range : null;
+    return Boolean(range) && !change.inserted && change.start === 0 && change.end > 0
+      && range.start.node === node && range.end.node === node && range.start.offset === 0 && range.end.offset === change.end
+      && ops[1][1]?.second === node && typeof ops[1][1].first === "string" && ops[1][1].first !== node;
   }
   let index = 0;
   if (change.removed) {

@@ -38,7 +38,7 @@ Stage 1 of the plan is also done:
 - **Fit to length.** Copilot tries its cuts on a copy of the document and gets the real page and word counts before it proposes them.
 - **Change record.** One Markdown file with every accepted change, the request, the reason and the author's note.
 
-The limits: a proposal starts inside one paragraph and cannot remove or join paragraphs, and one document is open in one canvas at a time. [Word fidelity](Word-Fidelity.md) lists what is verified against Word.
+The limits: a proposal starts inside one paragraph and cannot join paragraphs, and one document is open in one canvas at a time. [Word fidelity](Word-Fidelity.md) lists what is verified against Word.
 
 ## The plan
 
@@ -52,11 +52,13 @@ Done:
 - **Remarks that travel.** **Add as comment** turns a remark into a Word comment on the text.
 - **Rules that are checked without a model.** A block in the rules file sets a page limit, a word limit, a sentence length, a required heading or a word to avoid.
 
-The store still checks every accepted change: the engine's edit must do exactly the reviewed change, in one of three known forms, or the store refuses it.
+- **Remove a paragraph.** A proposal that deletes all the text of a paragraph removes the paragraph.
+
+The store still checks every accepted change: the engine's edit must do exactly the reviewed change, in one of four known forms, or the store refuses it.
 
 Open:
 
-1. **Remove and join paragraphs.** A proposal works inside one paragraph. It can add paragraphs after it, but it cannot remove a paragraph or join two.
+1. **Join paragraphs.** A proposal can add paragraphs and remove a whole paragraph. It cannot join two paragraphs, and it cannot remove the first paragraph of a document.
 2. **A tracked change with a new paragraph.** In Suggesting mode, a proposal with a line break is refused.
 
 ### Stage 3: one source, several readers
