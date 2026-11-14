@@ -1,7 +1,6 @@
 // The actions that Copilot can call on an open Ternleaf canvas. Each action
 // is data (name, description, input schema) and one function of the host.
 // The Copilot extension adds the canvas instance and the error handling.
-import { Rejected } from "../../packages/session/store.mjs";
 import { guide, rules } from "./guide.mjs";
 
 const requestId = { type: "string", format: "uuid",
@@ -14,7 +13,7 @@ const none = { type: ["object", "null"], additionalProperties: false, properties
 
 const after = {
   proposal: "The proposal is in the canvas for the author's review. Do not apply it. Reply in the chat with one short sentence.",
-  suggestions: "The kept suggestions are in the canvas for the author's review. Do not apply them. Reply in the chat with one short sentence.",
+  suggestions: "The kept suggestions are in the canvas for the author's review. Do not apply them. The items in refused are not in the canvas: each has the reason. Correct them and send them in a new call, or tell the author. Reply in the chat with one short sentence.",
 };
 
 export const actions = [
@@ -26,7 +25,7 @@ export const actions = [
   },
   {
     name: "ternleaf_status",
-    description: "The state of the canvas now: the open document and its revision, the text that the author has selected, a request from the canvas that waits for your answer, and a review that the author has not finished. Call it first, and again when a call is refused.",
+    description: "The state of the canvas now: the open document and its revision, the text that the author has selected, a request from the canvas that waits for your answer, a review that the author has not finished, and unsavedRevisions: the revisions that are not in the .docx file on disk. Call it first, and again when a call is refused.",
     inputSchema: none,
     run: host => {
       const status = host.status();
@@ -93,19 +92,15 @@ export const actions = [
           replacement: { type: "string", description: "For a change: the new text for the find text. An empty text removes the find text. A line break in it starts a new paragraph." },
           rationale: { type: "string", maxLength: 600, description: "For a change: one short sentence for the author." },
           remark: { type: "string", minLength: 1, maxLength: 600, description: "For a remark: what you noticed about the find text and what the author can do, in one or two sentences. Use it when no replacement text can solve the problem, for example a claim without a source, a contradiction, a missing owner or date, or a breach of the house rules that needs the author's knowledge." },
+          answers: { type: "string", pattern: "^c[0-9]+$", description: "For an edition only: the id of the change from the last ternleaf_reference_changes result that this change answers, for example \"c2\". When the author accepts the change, Ternleaf links the two paragraphs." },
         }, ["paragraph", "find"]),
       },
       revision: { type: "integer", minimum: 0, description: "Without a requestId only: the revision number from the ternleaf_read result that the paragraph numbers come from." },
       instructions,
     }, ["suggestions"]),
-    run: (host, input) => {
-      for (const item of input.suggestions ?? []) {
-        if ((item.replacement === undefined) === (item.remark === undefined)) {
-          throw new Rejected("invalid-suggestions", "Each suggestion needs a replacement or a remark, and not both.");
-        }
-      }
-      if (input.requestId) return { ...host.submitSuggestions(input.requestId, input.suggestions), next: after.suggestions };
-      return { ...host.suggestFromChat(input), next: after.suggestions };
+    run: async (host, input) => {
+      if (input.requestId) return { ...await host.submitSuggestions(input.requestId, input.suggestions), next: after.suggestions };
+      return { ...await host.suggestFromChat(input), next: after.suggestions };
     },
   },
   {
@@ -163,12 +158,12 @@ export const actions = [
   },
   {
     name: "ternleaf_reference_changes",
-    description: "For a document that is an edition of another document: the passages of the reference document that changed since the author last checked this edition, with the text before and after. Use it to bring the edition up to date. ternleaf_status says whether the open document is an edition.",
+    description: "For a document that is an edition of another document: the passages of the reference document that changed since the author last checked this edition, with the text before and after, an id for each change and the paragraph of the edition that it is linked to. Use it to bring the edition up to date. ternleaf_status says whether the open document is an edition.",
     inputSchema: none,
     run: async host => {
       const result = await host.referenceChanges();
       return { ...result, next: result.changes.length
-        ? "Read this edition with ternleaf_read. For each change, find the passage of the edition that says the same thing, and propose its update with ternleaf_suggest. That two passages say the same thing is your judgement: name the changed passage of the reference in the rationale, so that the author can check it. Where the edition must change and you cannot write the text, send a remark. Leave out a change that the edition does not cover."
+        ? "Read this edition with ternleaf_read. For each change, find the passage of the edition that says the same thing, and propose its update with ternleaf_suggest. Give each suggestion the id of the change that it answers in answers. A change with linkedTo was linked to that paragraph of the edition when the author accepted an earlier update: start there. A link is evidence, not proof: check that the paragraph still says the same thing. That two passages say the same thing is your judgement: name the changed passage of the reference in the rationale, so that the author can check it. Where the edition must change and you cannot write the text, send a remark. Leave out a change that the edition does not cover."
         : "The reference did not change since the author last checked this edition. Tell the author." };
     },
   },

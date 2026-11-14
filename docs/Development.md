@@ -37,11 +37,11 @@ It prints a URL with the access token. **Ask Copilot** answers "Copilot is not c
 npm test
 ```
 
-They need Node.js 24 and nothing else. They cover the session store (leases, publication, recovery after a killed process, undo and receipts), the review path, alternatives and author edits, whole-document suggestions, the project's documents (listing, the last document, new and added files, a file that changed on disk), the host's document switching over HTTP, every Copilot action with a test that plays the editor, the context for a prompt, the advice for tool calls, the comparison of changed words and the export check.
+They need Node.js 24 and the prebuilt engine in `engine/prebuilt`, which the repository has. They cover the session store (leases, publication, recovery after a killed process, undo and receipts), the review path, alternatives and author edits, whole-document suggestions, the project's documents (listing, the last document, new and added files, a file that changed on disk), the host's document switching over HTTP, every Copilot action with a test that plays the editor, the context for a prompt, the advice for tool calls, the comparison of changed words, the export check, the five forms of an accepted edit that the store allows, the rules for a change near a field result or a content control (`tests/structure.test.mjs`), the zip writer that compresses an edited export (`tests/zip.test.mjs`, with Node's zlib and the prebuilt engine) and the install.
 
 ### Browser test
 
-[`tests/browser.mjs`](../tests/browser.mjs) drives the real editor and host in Chrome with Playwright and plays the agent through the host's own functions. It covers a request, a saved draft, a reload, a lost reply during acceptance, decline, discard, alternatives, an author edit, a whole-document review, export, undo, retry and redo, and a project with several documents: open, new, add a file and a document that Copilot opens. The last part is Copilot's work from the chat against the real engine: read, page picture, the five export formats, suggestions and a proposal.
+[`tests/browser.mjs`](../tests/browser.mjs) drives the real editor and host in Chrome with Playwright and plays the agent through the host's own functions. It covers a request, a saved draft, a reload, a lost reply during acceptance, decline, discard, alternatives, an author edit, a whole-document review, export, undo, retry and redo, and a project with several documents: open, new, add a file and a document that Copilot opens. The last part is Copilot's work from the chat against the real engine: read, page picture, the five export formats, suggestions and a proposal. It also checks the quiet lines that the Review pane shows where a section is empty.
 
 ```powershell
 python -m pip install python-docx==1.2.0 lxml==6.0.2
@@ -56,6 +56,26 @@ node tests/browser.mjs (Join-Path $tools 'node_modules/playwright/index.mjs') `
 
 Update this test with every change to the editor's behaviour or labels.
 
+### Real documents
+
+[`tests/real-documents.mjs`](../tests/real-documents.mjs) runs Ternleaf on eight documents with the structure that a team writes: numbered headings, merged cells, footnotes, cross-references, headers and footers, comments, tracked changes, a table of contents and content controls. For each one it exports without a change, makes changes through Copilot's actions and the Review pane, exports again and compares the source structures of both files with an independent reader. It fails when a result differs from [`tests/real/expected.json`](../tests/real/expected.json). It needs Python with python-docx, and it uses LibreOffice as a second reader when `soffice` is installed.
+
+```bash
+OUT=$(mktemp -d)
+node tests/real-documents.mjs <playwright>/index.mjs <chrome> engine/prebuilt/webapp $OUT \
+  /usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf
+```
+
+The last line is "Real documents: 128 checks of 8 documents passed." After a fix that changes a result, update `expected.json` from `$OUT/real-documents-summary.json`. [`tests/real/repro.mjs`](../tests/real/repro.mjs) shows each engine defect with a minimal document, and [Requests for the engine](Engine-Requests.md) lists them. [Word fidelity](Word-Fidelity.md#documents-with-real-structure) has the results.
+
+### Install test
+
+[`tests/install.test.mjs`](../tests/install.test.mjs) is a unit test, so `npm test` runs it. It installs Ternleaf into a new folder that looks like a team's repository, updates it, removes it, opens the installed host and extension, and installs from a release that `copyRelease` of `scripts/package-canvas.mjs` makes. To run it alone:
+
+```bash
+node --test tests/install.test.mjs
+```
+
 ### Engine and Word tests
 
 [Word fidelity](Word-Fidelity.md) lists the engine tests and the comparisons with Microsoft Word. Run them after a change to the engine, the patch or the export path.
@@ -66,17 +86,17 @@ Automated tests do not cover the Copilot app itself. Before a release, open the 
 
 To test recovery from a lost reply in the app, set `"verification": { "loseProposalReplyOnce": true }` in `.ternleaf/canvas.json` with a disposable project file. The host then drops its first reply to an acceptance. The canvas must ask for a reload and show the accepted revision afterwards.
 
-## Package a bundle
+## Package a release
 
-A bundle is a folder with the extension, the shell, the host, the engine and every notice. It runs without this repository.
+A release is a folder with the layout of a clone, cut to what [`scripts/install.mjs`](../scripts/install.mjs) installs: the extension, the skill, the shell, the host, the agent surface, the session store, the examples, the prebuilt engine and every notice, with the install script and `package.json`. It has no `node_modules`, because the Copilot app gives the extension its `@github/copilot-sdk`. The file list comes from `layout` in `install.mjs`, so the release and an install from a clone cannot differ.
 
-```powershell
-npm.cmd ci --prefix .github/extensions/ternleaf
-node scripts/package-canvas.mjs $engine $bundle
-git -C $bundle init
+```bash
+node scripts/package-canvas.mjs $opendoc $release
 ```
 
-`$engine` is a built OpenDoc checkout (see [The document engine](Engine.md)) and `$bundle` is a new folder. The script needs the Rust toolchain, because it reads the licences of the build's dependency graph. It writes `BUNDLE-INVENTORY.json` with the versions, licence expressions and file hashes. The Copilot app discovers a repository extension in a Git folder, hence the `git init`.
+`$opendoc` is an OpenDoc checkout at the commit in `engine/opendoc.lock` with the Ternleaf patch applied (see [The document engine](Engine.md)), and `$release` is a new folder. The script checks that `engine/prebuilt` is a build of that commit and that patch, and, if the checkout holds a build, that it is the same module. It needs the Rust toolchain, because it copies the licences of every crate in the build and of the Rust standard library into `notices`. It writes `BUNDLE-INVENTORY.json` with the Ternleaf commit, whether the runtime files had changes that were not committed, the versions and licence expressions, and a hash for each file. The release's `README.md` says how to install it.
+
+A team unpacks the release and runs `node scripts/install.mjs <repository>`, as from a clone. [Install and run Ternleaf](Install.md) describes the install, the update and the removal.
 
 ## Conventions
 

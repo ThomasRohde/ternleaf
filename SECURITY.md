@@ -12,6 +12,7 @@ Include the steps to reproduce the problem, the effect, and the commit that you 
 - The loopback host binds to `127.0.0.1`, requires a per-canvas bearer token for every API call, and checks the `Host` and `Origin` headers.
 - A canvas opens only a `.docx` file inside the project or the session's working directory.
 - No canvas action can edit the document. Copilot reads the document only through the canvas actions, and the canvas tells the author each time. With `"chat": false` in `.ternleaf/canvas.json`, Copilot reads only what the author shares from the canvas for one request.
+- Ternleaf writes the author's `.docx` file only when the author chooses **Save to the Word file…** in the canvas, and only if the file on disk did not change since Ternleaf opened it. No canvas action can save.
 - A tool call by Copilot that writes a file in `.ternleaf`, or the `.docx` file that a canvas shows, needs the author's approval.
 
 A way around one of these points is a vulnerability.

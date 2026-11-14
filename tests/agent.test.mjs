@@ -68,7 +68,7 @@ test("every action describes itself, and the guide names every action", () => {
     assert(examples.length > 0, name + " has an example");
     for (const example of examples) {
       const keys = [...example.matchAll(/"([a-zA-Z]+)":/g)].map(match => match[1]);
-      const allowed = new Set([...fields("ternleaf_suggest"), ...fields("ternleaf_propose"), "paragraph", "find", "replacement", "rationale", "remark"]);
+      const allowed = new Set([...fields("ternleaf_suggest"), ...fields("ternleaf_propose"), "paragraph", "find", "replacement", "rationale", "remark", "answers"]);
       for (const key of keys) assert(allowed.has(key), `${key} in ${example}`);
     }
   }
@@ -138,6 +138,10 @@ test("Copilot works on the document from the chat, and the author stays in contr
     assert.deepEqual(status.canvas, { ready: true, pages: 2, words: 9, suggestingMode: false, selection: null });
     assert.equal(status.chatAccess, true);
     assert.match(status.next, /No text is selected/);
+    // Copilot knows that the .docx on disk is behind, but no action saves it.
+    assert.equal(status.unsavedRevisions, 0);
+    assert.match(guide, /The \.docx file on disk has the text of the last save to the file only[^\n]*Only the author can save/);
+    assert.deepEqual(actions.filter(item => /save|write/i.test(item.name)), []);
     assert.deepEqual((await action("ternleaf_guide")(host, {})).guide, guide);
 
     // The text comes from the editor, in numbered paragraphs.
@@ -158,10 +162,24 @@ test("Copilot works on the document from the chat, and the author stays in contr
     await refused(() => action("ternleaf_suggest")(host, { revision: 0,
       suggestions: [{ paragraph: 2, find: "The the", replacement: "The" }] }), "invalid-selection-or-instructions");
     const before = (await pulse()).stamp;
-    const suggested = action("ternleaf_suggest")(host, { instructions: "Proofread.", revision: 0, suggestions: [
+    // One bad item does not fail the list: each item is refused on its own,
+    // with the reason.
+    const checked = [];
+    const check = { check: job => { checked.push(job.changes); return { result: { blocked: job.changes.length > 1 ? [{ index: 1, reason: "This text is the result of a field, such as a cross-reference. Change the text beside it." }] : [] } }; } };
+    const suggested = await editor(action("ternleaf_suggest")(host, { instructions: "Proofread.", revision: 0, suggestions: [
       { paragraph: 2, find: "The the", replacement: "The", rationale: "A repeated word." },
-      { paragraph: 9, find: "x", replacement: "y" }] });
-    assert.deepEqual([suggested.suggested, suggested.refused], [1, [{ suggestion: 2, reason: "unknown paragraph number" }]]);
+      { paragraph: 9, find: "x", replacement: "y" },
+      { paragraph: 3, find: "old.\tThe", replacement: "old. The" },
+      { paragraph: 3, find: "leaks", replacement: "leaks\tbadly" },
+      { paragraph: 3, find: "roof leaks", replacement: "roof is wet", rationale: "x".repeat(601) },
+      { paragraph: 3, find: "leaks", replacement: "drips" }] }), check);
+    assert.deepEqual([suggested.suggested, suggested.refused], [1, [{ suggestion: 2, reason: "unknown paragraph number" },
+      { suggestion: 3, reason: "the find text has a tab or a line break. A change cannot cross it. Give the text before or after it" },
+      { suggestion: 4, reason: "the replacement has a tab. Ternleaf cannot write a tab. Give the text without it" },
+      { suggestion: 5, reason: "give a rationale of at most 600 characters" },
+      { suggestion: 6, reason: "cannot be applied: This text is the result of a field, such as a cross-reference. Change the text beside it." }]]);
+    // The canvas tried the two changes that passed the host's own checks.
+    assert.deepEqual(checked, [[{ node: node(2), find: "The the", replacement: "The" }, { node: node(3), find: "leaks", replacement: "drips" }]]);
     assert.equal((await pulse()).stamp, before + 1);
     const queue = await post("suggestions", { lease });
     assert.deepEqual([queue.origin, queue.batch.prompt, queue.batch.state, queue.suggestions[0].find], ["chat", "Proofread.", "answered", "The the"]);
@@ -221,9 +239,9 @@ test("Copilot works on the document from the chat, and the author stays in contr
     // A remark points at text and has no replacement. The author reads it.
     await refused(() => action("ternleaf_suggest")(host, { instructions: "Review.", revision: 0,
       suggestions: [{ paragraph: 2, find: "the plan", replacement: "it", remark: "Which plan?" }] }), "invalid-suggestions");
-    const reviewed = action("ternleaf_suggest")(host, { instructions: "Review against the house rules.", revision: 0, suggestions: [
+    const reviewed = await editor(action("ternleaf_suggest")(host, { instructions: "Review against the house rules.", revision: 0, suggestions: [
       { paragraph: 2, find: "the plan", remark: "Rule 2: name the plan and its date." },
-      { paragraph: 3, find: "leaks", replacement: "leaks in three places", rationale: "More exact." }] });
+      { paragraph: 3, find: "leaks", replacement: "leaks in three places", rationale: "More exact." }] }), { check: () => ({ result: { blocked: [] } }) });
     assert.equal(reviewed.suggested, 2);
     const mixed = (await post("suggestions", { lease })).suggestions;
     assert.deepEqual(mixed.map(item => [item.kind, item.find, item.replacement, item.rationale]),
@@ -285,8 +303,8 @@ test("Copilot works on the document from the chat, and the author stays in contr
     const moved = await editor(action("ternleaf_reference_changes")(host, {}), { reference: () => ({ result: {
       reference: "examples/welcome-to-ternleaf.docx", checked: 0, head: 3,
       changes: passageChanges([["a", "Costs 4 million."], ["b", "Opens in May."], ["c", " "]], [["a", "Costs 5 million."], ["d", "A new risk."]]) } }) });
-    assert.deepEqual(moved.changes, [{ change: "changed", before: "Costs 4 million.", after: "Costs 5 million." },
-      { change: "added", after: "A new risk." }, { change: "removed", before: "Opens in May." }]);
+    assert.deepEqual(moved.changes, [{ id: "c1", change: "changed", before: "Costs 4 million.", after: "Costs 5 million." },
+      { id: "c2", change: "added", after: "A new risk." }, { id: "c3", change: "removed", before: "Opens in May." }]);
     assert.deepEqual([moved.checkedRevision, moved.referenceRevision], [0, 3]);
     assert.match(moved.next, /ternleaf_suggest/);
     assert.deepEqual((await post("edition-checked", { lease, revision: 3 })).edition.checked, 3);
@@ -350,6 +368,93 @@ test("Copilot works on the document from the chat, and the author stays in contr
   } finally {
     await host.close();
     assert(existsSync(join(folder, ".ternleaf")));
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("an accepted update of an edition links its paragraph to the paragraph of the reference", async () => {
+  const folder = project();
+  const workspace = createWorkspace({ project: folder });
+  const host = await startHost({ ...workspace.resolve("docs/Brief.docx"), workspace, port: 0 });
+  const origin = new URL(host.url).origin;
+  const token = new URL(host.url).hash.slice(1);
+  const post = async (path, data) => {
+    const response = await fetch(origin + "/api/" + path, { method: "POST", body: JSON.stringify(data),
+      headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" } });
+    return { status: response.status, ...await response.json() };
+  };
+  const { lease } = await post("claim", { previous: null });
+  // The editor: it does the jobs that the actions queue.
+  const editor = async (work, answers) => {
+    let finished = false;
+    const result = Promise.resolve(work).finally(() => { finished = true; });
+    result.catch(() => {});
+    const done = new Set();
+    while (!finished) {
+      const state = await post("pulse", { lease, live: { revision: 0, pages: 1, words: 9, selection: null } });
+      for (const job of state.jobs.filter(item => !done.has(item.id))) {
+        done.add(job.id);
+        await post("job", { lease, id: job.id, ...(answers[job.kind]?.(job) ?? { error: "invalid-request" }) });
+      }
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    return result;
+  };
+  const brief = [[node(11), "The roof costs 4 million."], [node(12), "It opens in May."]];
+  const paper = [[node(1), "Costs 4 million."], [node(2), "Opens in May."]];
+  let linked = null;
+  const reference = () => ({ result: { reference: "examples/welcome-to-ternleaf.docx", checked: 0, head: 1,
+    changes: passageChanges(paper, [[node(1), "Costs 5 million."], [node(3), "A new risk."]]).map(item => ({ ...item, linked: item.node === node(1) ? linked : null })) } });
+  try {
+    await post("edition-set", { lease, reference: "examples/welcome-to-ternleaf.docx" });
+    await post("pulse", { lease, live: { revision: 0, pages: 1, words: 9, selection: null } });
+    const first = await editor(action("ternleaf_reference_changes")(host, {}), { reference });
+    assert.deepEqual(first.changes, [{ id: "c1", change: "changed", before: "Costs 4 million.", after: "Costs 5 million." },
+      { id: "c2", change: "added", after: "A new risk." }, { id: "c3", change: "removed", before: "Opens in May." }]);
+    assert.match(first.next, /answers[\s\S]*evidence, not proof/);
+    await editor(action("ternleaf_read")(host, {}), { read: () => ({ result: { revision: 0, paragraphs: brief, pages: 1, words: 9 } }) });
+    // A suggestion names the change that it answers. A name that the last
+    // result does not have is refused.
+    const sent = await editor(action("ternleaf_suggest")(host, { instructions: "Update the edition.", revision: 0, suggestions: [
+      { paragraph: 1, find: "4 million", replacement: "5 million", rationale: "The reference says 5 million.", answers: "c1" },
+      { paragraph: 2, find: "May", replacement: "June", answers: "c9" },
+      { paragraph: 2, find: "It opens", replacement: "It may open", answers: "c3" }] }), { check: () => ({ result: { blocked: [] } }) });
+    assert.equal(sent.suggested, 2);
+    assert.match(sent.refused[0].reason, /answers names no change/);
+    // Copilot's word alone records nothing.
+    assert.equal(workspace.edition(join(folder, "docs/Brief.docx")).links, undefined);
+    const [update, other] = (await post("suggestions", { lease })).suggestions;
+    // The author accepts both. The frames are the ones the editor makes.
+    for (const [head, suggestion, start, removed, inserted] of [[0, update, 15, "4", "5"], [1, other, 0, "opens", "may open"]]) {
+      const target = suggestion.node;
+      const opened = await post("adopt", { lease, id: suggestion.id,
+        scope: { node: target, start, end: start + Buffer.byteLength(suggestion.find), before: suggestion.find, revision: head, note: "" } });
+      assert.equal(opened.status, 200, JSON.stringify(opened));
+      const id = opened.draft.id;
+      const at = start + (suggestion === update ? 0 : 3);
+      const forward = [{ DeleteText: { range: { start: { node: target, offset: at }, end: { node: target, offset: at + removed.length } } } },
+        { InsertText: { at: { node: target, offset: at }, text: inserted } }];
+      const committed = await post("commit", { lease, request: { id, fingerprint: "f" + head, expected: head, command: { kind: "edit" },
+        frame: { base: head, revision: head + 1, forward, inverse: ["x"] }, editorial: { target, note: "" }, reviewId: id } });
+      assert.equal(committed.status, 200, JSON.stringify(committed));
+    }
+    // Only the accepted change with a paragraph of the reference is a link.
+    assert.deepEqual(workspace.edition(join(folder, "docs/Brief.docx")).links, { [node(1)]: node(11) });
+    // The next time, the editor names the linked paragraph, and Copilot gets it.
+    assert.deepEqual((await post("edition-reference", { lease })).edition.links, { [node(1)]: node(11) });
+    linked = { paragraph: 1, text: "The roof costs 5 million." };
+    const second = await editor(action("ternleaf_reference_changes")(host, {}), { reference });
+    assert.deepEqual(second.changes[0].linkedTo, { paragraph: 1, text: "The roof costs 5 million." });
+    // A check of the edition keeps the links. A new reference ends them.
+    await post("edition-checked", { lease, revision: 1 });
+    assert.deepEqual(workspace.edition(join(folder, "docs/Brief.docx")).links, { [node(1)]: node(11) });
+    workspace.setEdition(join(folder, "docs/Brief.docx"), "examples/welcome-to-ternleaf.docx", 1);
+    assert.deepEqual(workspace.edition(join(folder, "docs/Brief.docx")).links, { [node(1)]: node(11) });
+    // A save of the reference gives its paragraphs new IDs. The links follow.
+    workspace.restartEditionsOf(join(folder, "examples/welcome-to-ternleaf.docx"), { head: 1, renamed: [[node(1), node(21)]] });
+    assert.deepEqual(workspace.edition(join(folder, "docs/Brief.docx")).links, { [node(21)]: node(11) });
+  } finally {
+    await host.close();
     rmSync(folder, { recursive: true, force: true });
   }
 });

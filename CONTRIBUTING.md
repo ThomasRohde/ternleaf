@@ -27,6 +27,7 @@ These rules are the reason Ternleaf can be trusted with a document. A change mus
 - **Copilot never has to guess.** Every action and every input field has a description, and every refusal says what to do next. An agent that has to read the source to use Ternleaf has found a defect.
 - **One publication path.** Every change goes through `ProjectStore.publish`, with the writer lease, the expected revision and the engine frame checked together.
 - **No silent loss.** Export must refuse a DOCX when the engine reports lost source content.
+- **The author's file changes only when the author saves.** Ternleaf writes the `.docx` file only when the author chooses **Save to the Word file…**, with the same loss check as the export, and only if the file on disk did not change since Ternleaf opened it. No canvas action can save. A crash during a save must leave the old state or the new state.
 - **Keep the engine patch small.** Change the engine in a pinned checkout and carry the change in [`engine/opendoc.patch`](engine/opendoc.patch). [The document engine](docs/Engine.md) explains how.
 
 ## Pull requests

@@ -22,7 +22,8 @@ export function reviewChange({ before, replacement, start }) {
 // Does an engine frame do exactly the reviewed change? The store asks this
 // before it saves an accepted proposal, so that what the author reviewed is
 // what the document gets. `forward` is the list of operations of the frame.
-// Four forms are valid (the fourth is described where it is checked):
+// Five forms are valid (the fourth and the fifth are described where they
+// are checked):
 //  1. A deletion and an insertion of text. This is a change inside text of
 //     one formatting.
 //  2. The same, with the new text in parts: text, paragraph breaks, and
@@ -31,9 +32,17 @@ export function reviewChange({ before, replacement, start }) {
 //  3. One update of the review state of the paragraph, with the removed text
 //     as a tracked deletion and the new text as a tracked insertion. This is
 //     a change that the author accepted in Suggesting mode.
-export function frameDoesChange(forward, node, change) {
+// `inverse` is the frame's list of inverse operations. Only the fifth form
+// reads it.
+export function frameDoesChange(forward, node, change, inverse = null) {
   if (!Array.isArray(forward) || !forward.length) return false;
   const ops = forward.map(op => Object.entries(op ?? {})[0] ?? []);
+  // 5. The fill of an inline content control. A replacement of all the text
+  //    of a control would remove the control, so the editor fills it. The
+  //    paragraph gets its inlines again: the inlines before the edit (the
+  //    inverse), with the reviewed change in the text of one control, in
+  //    one run with the formatting of the control's first run.
+  if (ops.length === 1 && ops[0][0] === "SetInlines") return fillDoesChange(ops[0][1], inverse, node, change);
   if (ops.length === 1 && ops[0][0] === "UpdateReviewState") {
     const state = ops[0][1];
     if (change.inserted.includes("\n") || state?.comments != null || !Array.isArray(state?.paragraphs)
@@ -80,4 +89,33 @@ export function frameDoesChange(forward, node, change) {
     } else return false;
   }
   return written === change.inserted;
+}
+
+function fillDoesChange(after, inverse, node, change) {
+  const before = Array.isArray(inverse) && inverse.length === 1 ? inverse[0]?.SetInlines : null;
+  if (!before || after?.node !== node || before.node !== node || change.inserted.includes("\n")) return false;
+  const [now, then] = [after.inlines, before.inlines];
+  if (!Array.isArray(now) || !Array.isArray(then) || now.length !== then.length) return false;
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const changed = now.flatMap((item, index) => same(item, then[index]) ? [] : [index]);
+  if (changed.length !== 1) return false;
+  const [index] = changed;
+  const [filled, control] = [now[index], then[index]];
+  const runs = list => Array.isArray(list) && list.length > 0 && list.every(item => item?.type === "run" && typeof item.text === "string");
+  if (filled?.type !== "sdt" || control?.type !== "sdt" || filled.id !== control.id || !same(filled.properties, control.properties)
+    || !runs(control.inlines) || !runs(filled.inlines) || filled.inlines.length !== 1
+    || !same(filled.inlines[0].properties, control.inlines[0].properties)) return false;
+  // The offsets of the change count from the start of the paragraph, so
+  // everything before the control must be plain text.
+  if (index > 0 && !runs(then.slice(0, index))) return false;
+  const offset = utf8.encode(then.slice(0, index).map(item => item.text).join("")).length;
+  const old = utf8.encode(control.inlines.map(item => item.text).join(""));
+  const from = change.start - offset;
+  const to = change.end - offset;
+  if (from < 0 || to > old.length || from > to) return false;
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  try {
+    const text = decoder.decode(old.slice(0, from)) + change.inserted + decoder.decode(old.slice(to));
+    return decoder.decode(old.slice(from, to)) === change.removed && filled.inlines[0].text === text && text !== "";
+  } catch { return false; }
 }

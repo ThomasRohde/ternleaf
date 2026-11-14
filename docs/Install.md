@@ -1,23 +1,60 @@
 # Install and run Ternleaf
 
-Ternleaf is a repository extension for the GitHub Copilot desktop app. The repository contains a prebuilt engine, so you need no build tools.
+Ternleaf is a repository extension for the GitHub Copilot desktop app. It contains a prebuilt engine, so you need no build tools. You can try it in the Ternleaf repository, or install it in your own repository.
 
 ## Requirements
 
 - The GitHub Copilot desktop app with canvas extensions, signed in.
-- Git, to clone the repository.
+- Node.js 24 or later, to run the install script. The extension needs the `node:sqlite` module of Node.js 24 too.
+- Git, to clone the Ternleaf repository. A release bundle needs no Git.
 
 Ternleaf was developed and tested on Windows. The engine and the extension are platform-independent, but other systems are untested.
 
-## Run it
+## Try it in the Ternleaf repository
 
 1. Clone the repository.
 2. Open the folder in the Copilot app and start a session.
 3. Choose **+ → Canvas → Ternleaf**, or ask Copilot to "open the Ternleaf canvas".
 
-The canvas opens [`examples/welcome-to-ternleaf.docx`](../examples/welcome-to-ternleaf.docx), a short introduction to the canvas. It has three exercises: a selected passage, a whole-document review and a request in the chat. [`scripts/make-welcome.py`](../scripts/make-welcome.py) writes that document.
+The canvas opens [`examples/welcome-to-ternleaf.docx`](../examples/welcome-to-ternleaf.docx), a two-page introduction with four exercises: shorten a sentence, proofread the whole document, get a remark, and fit the document to one page. The first exercise takes less than a minute. [`examples/house-rules-tour.docx`](../examples/house-rules-tour.docx) is a tour of the house rules, the checks and a fit to a length. [`scripts/make-welcome.py`](../scripts/make-welcome.py) and [`scripts/make-tour.py`](../scripts/make-tour.py) write the two documents.
 
-If the canvas is not in the list, the app could not load the extension. Run `npm ci --prefix .github/extensions/ternleaf` and start a new session. This installs the Copilot SDK next to the extension for an app version that does not supply it.
+## Install it in your repository
+
+Run the install script from a clone of Ternleaf or from an unpacked release bundle. Give the path of your repository:
+
+```powershell
+node scripts/install.mjs C:/work/team-docs
+```
+
+The script tells you the size before it copies. Most of it is the document engine, about 38 MB in about 500 files. One of them is the compressed WebAssembly module, about 12 MB. The script then tells you what it did and what to do next.
+
+| Where | What |
+| --- | --- |
+| `.github/extensions/ternleaf/` | The extension, its parts (`apps`, `packages`), the engine (`engine/prebuilt`), the introduction (`examples`), the licence and the notices. |
+| `.github/extensions/ternleaf/ternleaf-install.json` | The manifest: each installed file with its SHA-256 hash. |
+| `.github/skills/ternleaf/SKILL.md` | The skill. Copilot looks for skills only in `.github/skills`. |
+| `.gitignore` | The lines `.ternleaf/` and `exports/`, if they are not there. They keep each author's revisions and exports out of the repository. |
+
+Nothing else changes. The project folder is the root of your repository: Ternleaf finds your documents there, writes its project files into `.ternleaf/` and its exports into `exports/`. The introduction opens from `.github/extensions/ternleaf/examples`, and the document list shows only your documents.
+
+Then open your repository in the Copilot app, start a new session and choose **+ → Canvas → Ternleaf**. A session that was open during the install does not see the extension. Commit the two folders if your team must get Ternleaf from the repository.
+
+| Command | Effect |
+| --- | --- |
+| `node scripts/install.mjs <repository>` | Install. Run it again from a newer clone or release to update. A file that is the same is not written again. |
+| `node scripts/install.mjs --check <repository>` | Report what an install or update would do. Change nothing. The exit code is 0 when nothing must change. |
+| `node scripts/install.mjs --remove <repository>` | Remove the files in the manifest, the lines that the install added to `.gitignore` and the folders that it made. Your documents, `.ternleaf/` and `exports/` stay. |
+| `--force` | Also replace or remove installed files that were changed in your repository. Without it, the script changes nothing and lists them. |
+
+The script never replaces a file that it did not write. If such a file is in the way, for example your own `.github/skills/ternleaf/SKILL.md`, the script changes nothing and names the file. Move or rename it and run the command again.
+
+[`scripts/package-canvas.mjs`](../scripts/package-canvas.mjs) makes a release bundle. It has the layout of a clone, cut to what the install script needs, with the licence notices of the engine and its dependencies.
+
+## If the canvas does not open
+
+- **The canvas is not in the list.** The app could not load the extension. Start a new session. If that does not help, run `npm ci --prefix .github/extensions/ternleaf` in the repository and start a new session. This installs the Copilot SDK next to the extension for an app version that does not supply it. The Copilot app normally supplies it, so the install script does not copy it.
+- **The canvas gives a sentence that starts with "Ternleaf cannot start".** A part is missing, or the Node.js of the app has no `node:sqlite`. The sentence says what to do. Usually that is to install again, or to update the Copilot app.
+- **The engine or the introduction is missing.** The sentence names the path. Run the install script again. `--check` lists the files that are missing or changed.
 
 ## Work on your own documents
 
@@ -30,13 +67,13 @@ Ternleaf works on the Word documents (`.docx`) in the project folder, which is t
 
 A new canvas returns to the document that you had open last.
 
-Each document has its own project file in `.ternleaf/`. The project file holds a copy of the source and every saved revision. Ternleaf never changes the `.docx` file itself. **Export DOCX** writes the current revision as a new file.
+Each document has its own project file in `.ternleaf/`. The project file holds a copy of the source and every saved revision. Ternleaf changes the `.docx` file only when you choose **Save to the Word file…**. Then the file gets the current text, and the history moves to `.ternleaf/archive`. **Export DOCX** writes the current revision as a new file. In `.ternleaf/canvas.json`, `"textCopy": false` and `"changeLog": false` stop the two Markdown files that a save writes next to the document.
 
 ### When a file changes outside Ternleaf
 
 If you edit a `.docx` in Word, or replace it, its saved revisions no longer match the file. When you open it, Ternleaf asks whether to start a new history from the file as it is now. The earlier history moves to `.ternleaf/archive`.
 
-To continue in Word and come back, export from Ternleaf, edit the export in Word, and add or open the result as a new document.
+To continue in Word and come back, export from Ternleaf, edit the export in Word, and merge it with **Merge a copy from Word** (see below).
 
 ## Configure the project
 
@@ -47,9 +84,11 @@ To continue in Word and come back, export from Ternleaf, edit the export in Word
 | `fonts` | Font files to load, in addition to the fonts that come with the engine. |
 | `source` | The document that opens in a project where no document was opened before. |
 | `state` | The SQLite project file for `source`. Set both or neither. |
-| `engine` | The folder of the OpenDoc web application. The default is `engine/prebuilt/webapp`. |
+| `engine` | The folder of the OpenDoc web application. The default is `engine/prebuilt/webapp` in the project folder, or else in the folder of the installed extension. |
 | `rules` | The path of the house rules file. The default is `ternleaf.rules.md` in the project folder. |
 | `chat` | Set it to `false` to keep Copilot to the requests that you send from the canvas. Copilot then cannot read the document for a request in the chat. |
+| `textCopy` | Set it to `false` to stop the text copy `<file>.docx.md` that **Save to the Word file…** writes next to the document. |
+| `changeLog` | Set it to `false` to stop the change log `<file>.docx.changes.md` that **Save to the Word file…** writes next to the document. |
 
 Paths are relative to the project folder or absolute.
 
@@ -96,12 +135,12 @@ The editor's settings, such as the theme, the language, your name for comments a
 - **Wide changes.** A proposal can replace text across bold and plain text. The new text gets the formatting of the first replaced word. The review warns you and shows the page after the change. A proposal can also add paragraphs.
 - **Tracked changes.** Switch the editor from Editing to Suggesting. A proposal that you accept then becomes a Word tracked change. Set your name in the editor's settings first.
 - **Editions.** A document can be an edition of another document of the project: a short brief of a long paper, for example. Choose the arrow next to **Export DOCX**, then **Make this an edition of…**, and choose the reference document. When the reference changes, the top of the Review pane lists the changed passages. **Ask Copilot to update** asks for proposals for this edition. **Mark as checked** says that the edition is right for the reference as it is now.
-- **A copy from Word.** Export a Word file and keep its name: the name has the revision, for example `brief-r12.docx`. When the edited file comes back, choose the arrow next to **Export DOCX**, then **Merge a copy from Word**. The text changes from Word come to the review as suggestions. A paragraph that also changed here is shown as a conflict: merge it by hand. New paragraphs and formatting from the copy are counted, not merged. **Review → Compare** shows them.
+- **A copy from Word.** Export a Word file and keep its name: the name has the revision and the history, for example `brief-r12-0a1b2c3d4e.docx`. When the edited file comes back, choose the arrow next to **Export DOCX**, then **Merge a copy from Word**. Changed, new and removed paragraphs from Word come to the review as suggestions, also for a copy from before a save to the Word file. A paragraph that also changed here is shown as a conflict: merge it by hand. Formatting and comments from the copy are counted, not merged. **Review → Compare** shows them.
 - **Fit to a length.** Ask in the chat, for example "Fit this document to two pages". Copilot measures its cuts on a copy before it suggests them.
 - **Change record.** In the History tab, **Download the change record** writes a Markdown file with every accepted change, its request, its reason and your note.
 - **Whole document.** Choose **Whole document**, then a quick review or your own instruction. **Review** opens a suggestion as a proposal. **Accept change** goes to the next one, and **Skip** leaves the text as it is.
 - **History.** The History tab lists every revision. Undo and redo are revisions too. Ternleaf saves each change at once, so there is nothing to save by hand: Ctrl+S confirms the saved revision.
-- **Export.** **Export DOCX** downloads the current revision as a Word file. The arrow next to it offers PDF, Markdown, web page and plain text. If a Word export would leave out a known legacy part of the source, Ternleaf explains it and asks first. If it would lose anything else, Ternleaf refuses the Word export, and the other formats still work.
+- **Export.** **Export DOCX** downloads the current revision as a Word file. The arrow next to it offers PDF, Markdown, web page and plain text. If a Word export would leave out a known legacy part of the source, Ternleaf explains it and asks first. If it would lose anything else, Ternleaf refuses the Word export, and the other formats still work. Today that is the case after an edit in a document with comments that Word wrote, or with a table of contents that Word made.
 - **Suggesting mode.** The editor's Suggesting mode records your own edits as tracked changes, and an accepted Copilot proposal too.
 - **Recover.** If the canvas loses its connection, choose **Reload**. The canvas opens the last saved revision. A proposal that Copilot already sent is still there.
 

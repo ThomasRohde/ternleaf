@@ -224,6 +224,27 @@ test("the store accepts only a frame that does exactly the reviewed change", asy
   assert(!frameDoesChange(tracked([run("bold kernel")]), node, narrow));
   assert(!frameDoesChange([{ UpdateReviewState: { paragraphs: [{ node: fresh, inlines: [revision("insertion", "kernel"), revision("deletion", "middle")] }], comments: null } }], node, narrow));
   assert(!frameDoesChange(tracked([revision("insertion", "one\ntwo"), revision("deletion", "stays")]), node, wide));
+
+  // The fill of a content control: the inlines again, with the new text in
+  // the control, in the format that the engine writes (fillContentControl).
+  const owner = reviewChange({ before: "Søren Kjær", replacement: "Mette Ørsted", start: 7 });
+  const control = (text, properties = { bold: true }) => ({ type: "sdt", id: "c".repeat(32), properties: { controlKind: "plain_text", alias: "Owner" },
+    inlines: [{ type: "run", id: "d".repeat(32), properties, text }] });
+  const plain = text => ({ type: "run", id: "e".repeat(32), properties: {}, text });
+  const inlines = (...list) => [{ SetInlines: { node, inlines: list } }];
+  const before = inlines(plain("Owner: "), control("Søren Kjær"), plain(" is here."));
+  assert(frameDoesChange(inlines(plain("Owner: "), control("Mette Ørsted"), plain(" is here.")), node, owner, before));
+  assert(!frameDoesChange(inlines(plain("Owner: "), control("Mette Ørsted"), plain(" is here.")), node, owner), "the inverse is needed");
+  assert(!frameDoesChange(inlines(plain("Owner: "), control("Mette Hansen"), plain(" is here.")), node, owner, before));
+  assert(!frameDoesChange(inlines(plain("Owner: "), control("Mette Ørsted", {}), plain(" is here.")), node, owner, before), "the formatting stays");
+  assert(!frameDoesChange(inlines(plain("Ejer: "), control("Mette Ørsted"), plain(" is here.")), node, owner, before), "nothing else changes");
+  assert(!frameDoesChange(inlines(plain("Owner: "), control("Mette Ørsted"), plain(" is here.")), fresh, owner, before));
+  const shifted = reviewChange({ before: "Søren Kjær", replacement: "Mette Ørsted", start: 6 });
+  assert(!frameDoesChange(inlines(plain("Owner: "), control("Mette Ørsted"), plain(" is here.")), node, shifted, before), "the change is at the control");
+  const part = reviewChange({ before: "Søren Kjær", replacement: "Søren Hansen", start: 7 });
+  assert(frameDoesChange(inlines(plain("Owner: "), control("Søren Hansen"), plain(" is here.")), node, part, before));
+  const empty = reviewChange({ before: "Søren Kjær", replacement: "", start: 7 });
+  assert(!frameDoesChange(inlines(plain("Owner: "), control(""), plain(" is here.")), node, empty, before));
 });
 
 test("the changes of a copy from Word become suggestions with a find text that occurs once", async () => {
@@ -245,4 +266,66 @@ test("the changes of a copy from Word become suggestions with a find text that o
     { node: "b", find: "two ", replacement: "" }, { node: "c", find: "x", replacement: "yx" }]);
   assert.equal(other, 2);
   for (const { node, find } of suggestions) assert.equal(text[node].split(find).length, 2);
+});
+
+test("new and removed paragraphs of a copy from Word become suggestions on the paragraphs of the base", async () => {
+  const { suggestionsFromComparison } = await import("../apps/editor/merge.mjs");
+  // The shapes are those of the engine's comparison. An added paragraph has
+  // only its place in the copy, and the copy's IDs are not the base's.
+  const text = { a: "First paragraph here.", b: "Second paragraph, and the second part.", c: "Third paragraph.", d: "Fourth paragraph." };
+  const blocks = ["a", "b", "c", null, "d"];
+  const block = index => [{ kind: "block", index }];
+  const inserted = (index, rightText) => ({ family: "block", kind: "insertion", left: null, right: { path: block(index), node: "x" }, rightText });
+  const deleted = (node, index) => ({ family: "block", kind: "deletion", left: { path: block(index), node }, right: null, leftText: text[node] });
+  // The copy: new before a, a, b with a change and two new paragraphs after
+  // it, the table, d. c is removed.
+  const comparison = { left: { blocks: 5 }, right: { blocks: 7 }, changes: [
+    inserted(0, "Before all."),
+    { family: "text", left: { path: block(1), node: "b", start: 0, end: 6 }, right: {}, rightText: "Other" },
+    inserted(3, "New one."), inserted(4, "New two."),
+    deleted("c", 2),
+    { family: "section", kind: "property" }] };
+  const { suggestions, other } = suggestionsFromComparison(comparison, node => text[node] ?? null, blocks);
+  assert.deepEqual(suggestions, [
+    { node: "b", find: "Second paragraph, and the second part.", replacement: "Other paragraph, and the second part.\nNew one.\nNew two." },
+    { node: "c", find: "Third paragraph.", replacement: "" }]);
+  assert.equal(other, 1, "the paragraph before the first one is counted");
+  // The first paragraph, a paragraph after a table and a paragraph that is
+  // now the first one cannot be merged.
+  const first = suggestionsFromComparison({ left: { blocks: 5 }, right: { blocks: 4 }, changes: [
+    inserted(0, "Instead of a."), deleted("a", 0), deleted("d", 4)] }, node => text[node] ?? null, blocks);
+  assert.deepEqual(first, { suggestions: [], other: 3 });
+  // Only added paragraphs: the find text is the last word, widened until it
+  // occurs once.
+  const after = suggestionsFromComparison({ left: { blocks: 5 }, right: { blocks: 6 }, changes: [inserted(2, "After b.")] },
+    node => ({ ...text, b: "Part two. Part two." })[node] ?? null, blocks);
+  assert.deepEqual(after.suggestions, [{ node: "b", find: "two. Part two.", replacement: "two. Part two.\nAfter b." }]);
+  // When the counts of blocks do not agree, an added paragraph is counted.
+  assert.deepEqual(suggestionsFromComparison({ left: { blocks: 5 }, right: { blocks: 9 }, changes: [inserted(2, "After b.")] },
+    node => text[node] ?? null, blocks), { suggestions: [], other: 1 });
+});
+
+test("a Word export names its history, and paragraphs are paired across a save", async () => {
+  const { exportedName, pairParagraphs } = await import("../apps/editor/merge.mjs");
+  assert.deepEqual(["brief-r12-0a1b2c3d4e.docx", "Brief-r0-0A1B2C3D4E (1).docx", "brief-r3.docx", "brief.docx"].map(exportedName), [
+    { revision: 12, history: "0a1b2c3d4e" }, { revision: 0, history: "0a1b2c3d4e" }, { revision: 3, history: null }, { revision: null, history: null }]);
+  // The end of one history and the start of the next have the same text
+  // and new IDs. A paragraph removed in the middle history has no pair.
+  const ids = pairParagraphs([
+    [[["a", "One."], ["b", "Two."]], [["c", "One."], ["d", "Two."]]],
+    [[["c", "One."], ["x", "New."]], [["e", "One."], ["f", "New."]]]]);
+  assert.deepEqual([...ids], [["a", "e"]]);
+  assert.equal(pairParagraphs([[[["a", "One."]], [["c", "Changed on disk."]]]]), null);
+});
+
+test("passages that the author did not check before a save of the reference come back with the later changes", async () => {
+  const { combinePassages } = await import("../apps/editor/edition.mjs");
+  const carried = [{ change: "changed", before: "A.", after: "B." }, { change: "added", after: "New." }, { change: "changed", before: "X.", after: "Y." }];
+  assert.deepEqual(combinePassages(carried, [
+    { change: "changed", before: "B.", after: "C." },   // One change from the first text to the last.
+    { change: "removed", before: "New." },              // Added, then removed: no change.
+    { change: "changed", before: "Y.", after: "X." },   // Back to the first text: no change.
+    { change: "changed", before: "P.", after: "Q." }]), [
+    { change: "changed", before: "A.", after: "C." }, { change: "changed", before: "P.", after: "Q." }]);
+  assert.deepEqual(combinePassages(undefined, [{ change: "added", after: "N." }]), [{ change: "added", after: "N." }]);
 });

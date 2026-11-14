@@ -9,6 +9,9 @@ permissions:
   contents: read
 
 jobs:
+  # tests/*.test.mjs: the store, the host, the agent surface, the install,
+  # the zip writer and the rules for fields and content controls. The zip
+  # test uses the prebuilt engine in engine/prebuilt.
   unit:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -20,3 +23,37 @@ jobs:
         with:
           node-version: 24
       - run: npm test
+
+  # The editor in Chrome with the prebuilt engine: the browser test, the
+  # real documents and the engine reproductions. They need no engine build.
+  # The page counts in tests/real/expected.json are for Liberation Sans.
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get install -y fonts-liberation
+      - run: python -m pip install python-docx==1.2.0 lxml==6.0.2
+      - run: npm install --prefix "$RUNNER_TEMP/tools" playwright@1.63.0
+      - name: Browser test
+        run: |
+          out="$RUNNER_TEMP/browser"
+          mkdir -p "$out"
+          python tests/fixtures.py "$out"
+          node tests/browser.mjs "$RUNNER_TEMP/tools/node_modules/playwright/index.mjs" /usr/bin/google-chrome \
+            engine/prebuilt/webapp "$out" /usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf
+      - name: Real documents
+        run: |
+          out="$RUNNER_TEMP/real"
+          mkdir -p "$out"
+          node tests/real-documents.mjs "$RUNNER_TEMP/tools/node_modules/playwright/index.mjs" /usr/bin/google-chrome \
+            engine/prebuilt/webapp "$out" /usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf
+      - name: Engine reproductions
+        run: |
+          python tests/real/make-minimal.py "$RUNNER_TEMP/minimal"
+          node tests/real/repro.mjs engine/prebuilt/webapp "$RUNNER_TEMP/minimal"

@@ -12,7 +12,7 @@ Ternleaf needs an engine that it can ship in full, that keeps a Word document in
 - **Revisioned edits.** Every mutation goes through a transaction log with inverse operations. That gives Ternleaf a single place to admit or refuse a change.
 - **Honest export.** The exporter reports what it could not keep, so Ternleaf can refuse a lossy file.
 
-Its main limit is the preservation of source XML that it does not model. Ternleaf handles that limit by refusing an export that would lose content.
+Its main limit is the preservation of source XML that it does not model. Ternleaf handles that limit by refusing an export that would lose content. [Requests for the engine](Engine-Requests.md) lists the defects that need a change in the engine, each with its smallest reproduction.
 
 ## The pin and the patch
 

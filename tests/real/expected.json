@@ -1,0 +1,285 @@
+{
+ "adr-event-streaming.docx": {
+  "pages": 2,
+  "unchangedIdentical": true,
+  "unchangedAction": "identical",
+  "changes": [
+   "body: accepted",
+   "list: accepted",
+   "heading: accepted",
+   "link paragraph: accepted",
+   "styled run: accepted",
+   "across a link: refused by ternleaf_suggest",
+   "new list item: accepted"
+  ],
+  "editedRefused": [],
+  "editedAction": "written",
+  "editedActionStored": false,
+  "editedActionSentence": null,
+  "reopenSameText": true,
+  "lost": [
+   "styleIds",
+   "stylesWithNumbering"
+  ],
+  "silent": [
+   "styleIds",
+   "stylesWithNumbering"
+  ],
+  "newParagraphListLevels": [
+   [
+    0,
+    0
+   ]
+  ],
+  "reasons": [
+   "across a link: Suggestions refused: no item can go to the author. Give 1 to 60 suggestions. Each needs a paragraph number from ternleaf_read, a find text copied exactly from that paragraph (no line breaks or tabs), and a different replacement or a remark. Correct each item as its reason says. Refused: suggestion 1, cannot be applied: This change touches a link. Ternleaf cannot change the text of a link. Change the text beside it, or edit the link in the document."
+  ],
+  "notices": [],
+  "editedStored": true,
+  "errors": 0
+ },
+ "da-brief-identity.docx": {
+  "pages": 1,
+  "unchangedIdentical": true,
+  "unchangedAction": "identical",
+  "changes": [
+   "body: accepted",
+   "table cell: accepted",
+   "merged cell: accepted",
+   "header row cell: accepted",
+   "list: accepted",
+   "heading: accepted"
+  ],
+  "editedRefused": [],
+  "editedAction": "written",
+  "editedActionStored": false,
+  "editedActionSentence": null,
+  "reopenSameText": true,
+  "lost": [
+   "styleIds",
+   "stylesWithNumbering"
+  ],
+  "silent": [
+   "styleIds",
+   "stylesWithNumbering"
+  ],
+  "newParagraphListLevels": [],
+  "reasons": [],
+  "notices": [],
+  "editedStored": true,
+  "errors": 0
+ },
+ "standard-api.docx": {
+  "pages": 1,
+  "unchangedIdentical": true,
+  "unchangedAction": "identical",
+  "changes": [
+   "body: accepted",
+   "list: accepted",
+   "list bold keyword: accepted",
+   "heading: accepted",
+   "tab paragraph: accepted",
+   "across a tab: refused by ternleaf_suggest"
+  ],
+  "editedRefused": [],
+  "editedAction": "written",
+  "editedActionStored": false,
+  "editedActionSentence": null,
+  "reopenSameText": true,
+  "lost": [
+   "styleIds",
+   "stylesWithNumbering"
+  ],
+  "silent": [
+   "styleIds",
+   "stylesWithNumbering"
+  ],
+  "newParagraphListLevels": [],
+  "reasons": [
+   "across a tab: Suggestions refused: no item can go to the author. Give 1 to 60 suggestions. Each needs a paragraph number from ternleaf_read, a find text copied exactly from that paragraph (no line breaks or tabs), and a different replacement or a remark. Correct each item as its reason says. Refused: suggestion 1, the find text has a tab or a line break. A change cannot cross it. Give the text before or after it."
+  ],
+  "notices": [],
+  "editedStored": true,
+  "errors": 0
+ },
+ "minutes-eada.docx": {
+  "pages": 2,
+  "unchangedIdentical": true,
+  "unchangedAction": "identical",
+  "changes": [
+   "body: accepted",
+   "table cell: accepted",
+   "second paragraph in cell: accepted",
+   "list: accepted",
+   "heading: accepted",
+   "whole cell text: accepted",
+   "remove cell text: accepted"
+  ],
+  "editedRefused": [],
+  "editedAction": "written",
+  "editedActionStored": false,
+  "editedActionSentence": null,
+  "reopenSameText": true,
+  "lost": [
+   "styleIds",
+   "stylesWithNumbering"
+  ],
+  "silent": [
+   "styleIds",
+   "stylesWithNumbering"
+  ],
+  "newParagraphListLevels": [],
+  "reasons": [],
+  "notices": [
+   "remove cell text: This change empties the table cell."
+  ],
+  "editedStored": true,
+  "errors": 0
+ },
+ "notes-crossref.docx": {
+  "pages": 1,
+  "unchangedIdentical": true,
+  "unchangedAction": "identical",
+  "changes": [
+   "body: accepted",
+   "footnote paragraph: accepted",
+   "field paragraph: accepted",
+   "table cell: accepted",
+   "heading: accepted",
+   "footnote text: accepted",
+   "across a field result: refused by ternleaf_suggest"
+  ],
+  "editedRefused": [],
+  "editedAction": "written",
+  "editedActionStored": false,
+  "editedActionSentence": null,
+  "reopenSameText": true,
+  "lost": [
+   "noteSeparators",
+   "styleIds",
+   "stylesWithNumbering"
+  ],
+  "silent": [
+   "noteSeparators",
+   "styleIds",
+   "stylesWithNumbering"
+  ],
+  "newParagraphListLevels": [],
+  "reasons": [
+   "across a field result: Suggestions refused: no item can go to the author. Give 1 to 60 suggestions. Each needs a paragraph number from ternleaf_read, a find text copied exactly from that paragraph (no line breaks or tabs), and a different replacement or a remark. Correct each item as its reason says. Refused: suggestion 1, cannot be applied: This text is the result of a field, such as a cross-reference. Change the text beside it."
+  ],
+  "notices": [],
+  "editedStored": true,
+  "errors": 0
+ },
+ "layout-landscape.docx": {
+  "pages": 3,
+  "unchangedIdentical": true,
+  "unchangedAction": "identical",
+  "changes": [
+   "body: accepted",
+   "landscape table cell: accepted",
+   "landscape body: accepted",
+   "heading: accepted",
+   "header: accepted",
+   "caption: accepted",
+   "footer beside a field: accepted",
+   "remove a header paragraph: accepted"
+  ],
+  "editedRefused": [],
+  "editedAction": "written",
+  "editedActionStored": false,
+  "editedActionSentence": null,
+  "reopenSameText": true,
+  "lost": [
+   "simpleFields",
+   "styleIds",
+   "stylesWithNumbering"
+  ],
+  "silent": [
+   "simpleFields",
+   "styleIds",
+   "stylesWithNumbering"
+  ],
+  "newParagraphListLevels": [],
+  "reasons": [],
+  "notices": [
+   "remove a header paragraph: This change deletes all the text of the paragraph. The empty paragraph stays, because Ternleaf can join it only to a paragraph before it in the same part of the document."
+  ],
+  "editedStored": true,
+  "errors": 0
+ },
+ "review-comments.docx": {
+  "pages": 1,
+  "unchangedIdentical": true,
+  "unchangedAction": "identical",
+  "changes": [
+   "body: accepted",
+   "commented paragraph: accepted",
+   "paragraph with insertion: accepted",
+   "inside an insertion: accepted",
+   "paragraph with deletion: accepted",
+   "across an insertion edge: accepted",
+   "heading: accepted"
+  ],
+  "editedRefused": [
+   "annotationRef",
+   "pStyle",
+   "rStyle"
+  ],
+  "editedAction": "export-refused",
+  "editedActionStored": null,
+  "editedActionSentence": "Ternleaf cannot write this document as a Word file without losing content. Use the pdf, markdown, html or text format. After an edit, the engine does not keep parts of the Word comments (the comment marks and the comment styles). The revisions are saved in the canvas.",
+  "reopenSameText": true,
+  "lost": [
+   "styleIds",
+   "stylesWithNumbering"
+  ],
+  "silent": [],
+  "newParagraphListLevels": [],
+  "reasons": [],
+  "notices": [],
+  "editedStored": true,
+  "errors": 0
+ },
+ "toc-controls.docx": {
+  "pages": 3,
+  "unchangedIdentical": true,
+  "unchangedAction": "identical",
+  "changes": [
+   "body: accepted",
+   "heading: accepted",
+   "content control: accepted",
+   "beside a content control: accepted",
+   "across a content control edge: refused by ternleaf_suggest",
+   "drop-down text that is not a choice: refused by ternleaf_suggest",
+   "drop-down choice: accepted",
+   "block content control: accepted",
+   "table of contents entry: refused by ternleaf_suggest"
+  ],
+  "editedRefused": [
+   "fldChar",
+   "instrText"
+  ],
+  "editedAction": "export-refused",
+  "editedActionStored": null,
+  "editedActionSentence": "Ternleaf cannot write this document as a Word file without losing content. Use the pdf, markdown, html or text format. After an edit, the engine does not keep a table of contents or another field that spans paragraphs. The revisions are saved in the canvas.",
+  "reopenSameText": true,
+  "lost": [
+   "fields",
+   "numberingLevels",
+   "styleIds",
+   "stylesWithNumbering"
+  ],
+  "silent": [],
+  "newParagraphListLevels": [],
+  "reasons": [
+   "across a content control edge: Suggestions refused: no item can go to the author. Give 1 to 60 suggestions. Each needs a paragraph number from ternleaf_read, a find text copied exactly from that paragraph (no line breaks or tabs), and a different replacement or a remark. Correct each item as its reason says. Refused: suggestion 1, cannot be applied: This change crosses the edge of a content control. Change the text in the control or the text beside it, not both.",
+   "drop-down text that is not a choice: Suggestions refused: no item can go to the author. Give 1 to 60 suggestions. Each needs a paragraph number from ternleaf_read, a find text copied exactly from that paragraph (no line breaks or tabs), and a different replacement or a remark. Correct each item as its reason says. Refused: suggestion 1, cannot be applied: This text is a choice in a drop-down list. Give one of the choices: Draft, Approved. Or choose it in the control in the document.",
+   "table of contents entry: Suggestions refused: no item can go to the author. Give 1 to 60 suggestions. Each needs a paragraph number from ternleaf_read, a find text copied exactly from that paragraph (no line breaks or tabs), and a different replacement or a remark. Correct each item as its reason says. Refused: suggestion 1, cannot be applied: This text is in the table of contents. Change the heading. Word updates the table of contents when you update the field."
+  ],
+  "notices": [],
+  "editedStored": true,
+  "errors": 0
+ }
+}

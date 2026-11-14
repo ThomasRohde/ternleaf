@@ -1,13 +1,15 @@
 import { open as openDoc } from "/pkg/casual_doc_wasm.js";
-import { authorDecides, validateDocxExport } from "./export-policy.mjs";
-import { reviewChange } from "./review-change.mjs";
+import { authorDecides, lossInWords, validateDocxExport } from "./export-policy.mjs";
+import { frameDoesChange, reviewChange } from "./review-change.mjs";
+import { contentsStyle, controlChange, fieldRanges, sentences, touches } from "./structure.mjs";
+import { compressZip, entryContent, fieldCounts, isStored, readZip } from "./zip.mjs";
 import { runChecks } from "./checks.mjs";
-import { passageChanges, updateInstruction } from "./edition.mjs";
+import { combinePassages, firstWords, passageChanges, updateInstruction } from "./edition.mjs";
 import { forAuthor } from "./messages.mjs";
 import { captureWordEvidence } from "./word-evidence.mjs";
 import { wordCount, wordDiff } from "./diff.mjs";
 import { documentActions, layout, quickActions } from "./shell.mjs";
-import { confirmDialog, createDocuments } from "./documents.mjs";
+import { confirmDialog, copyDialog, createDocuments } from "./documents.mjs";
 import { ago } from "./time.mjs";
 
 const format = "org.openxmlformats.wordprocessingml.document";
@@ -71,6 +73,10 @@ export function attachTernleaf(editor) {
   const leaseKey = "ternleaf-lease";
   let blocked = false;
   let epoch;                // The host's count of documents, from the claim.
+  let leaving = false;      // A save to the file is done. The page reloads when the author closes its window.
+  let saveFile = { textCopy: true, changeLog: true };
+  // The identifier of this history. A Word export carries it in its name.
+  let history = null;
 
   // A short notice at the bottom of the canvas. It goes away by itself.
   let toastTimer;
@@ -88,7 +94,11 @@ export function attachTernleaf(editor) {
     diagnostics.textContent = `Saved revision ${journal.length}` + (last === undefined ? "" :
       ` · last admission ${last.toFixed(1)} ms · ${admissionMs.length} samples this opening`);
   };
-  const ready = () => message(journal.length ? "Saved at revision " + journal.length : "Saved at revision 0", "ok");
+  // Two kinds of saved: every revision is saved in Ternleaf at once, and the
+  // Word file on disk has the text of the last save to the file, which is
+  // where this history starts.
+  const ready = () => message(journal.length ? `Saved at revision ${journal.length} · not in the Word file`
+    : "Saved at revision 0 · same as the Word file", "ok");
   const report = error => {
     button("reload").hidden = !blocked;
     panel.dataset.blocked = String(blocked);
@@ -98,7 +108,7 @@ export function attachTernleaf(editor) {
   const sent = () => ({ ...headers(token), ...(epoch === undefined ? {} : { "X-Ternleaf-Epoch": String(epoch) }) });
   // The host answers "document-changed" when the canvas was told to show
   // another document. The page then loads that document.
-  const moved = code => { if (code === "document-changed") { reload(); return true; } return false; };
+  const moved = code => { if (code === "document-changed") { if (!leaving) reload(); return true; } return false; };
 
   function postSync(path, data) {
     const req = new XMLHttpRequest();
@@ -142,6 +152,9 @@ export function attachTernleaf(editor) {
     }
     if (record.id === draft?.id) {
       accepted = record.id;
+      // A quick request is done when its proposal is accepted. Its text
+      // must not stay in the instruction box as if it were the author's.
+      if (presets.has(prompt.value)) prompt.value = "";
       draft = undefined;
       proposal = undefined;
       dropPreview();
@@ -199,7 +212,7 @@ export function attachTernleaf(editor) {
     if (back && back.offsetParent) back.click();
   };
   const everySaved = () => toast(blocked ? "This canvas cannot save. Reload it to get the last saved revision."
-    : `Saved at revision ${journal.length}. Ternleaf saves every change.`, blocked ? "problem" : "ok");
+    : `Saved at revision ${journal.length}. Ternleaf saves every change. The Word file changes only when you choose Save to the Word file.`, blocked ? "problem" : "ok");
   const replaced = {
     "file.open": () => void documents.open(),
     "file.new": () => void documents.create(),
@@ -223,7 +236,8 @@ export function attachTernleaf(editor) {
     if (label.textContent !== text) label.textContent = text;
     if (symbol.textContent !== glyph) symbol.textContent = glyph;
     if (pill.dataset.state !== "opened") pill.dataset.state = "opened";
-    pill.title = blocked ? "Reload the canvas to get the last saved revision." : "Ternleaf saves every change as a revision.";
+    pill.title = blocked ? "Reload the canvas to get the last saved revision."
+      : "Ternleaf saves every change as a revision. The Word file changes only when you choose Save to the Word file.";
   }
   if (pill) new MutationObserver(paintPill).observe(pill, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["data-state"] });
 
@@ -259,6 +273,9 @@ export function attachTernleaf(editor) {
     journal = state.journal;
     reviewed = state.accepted ?? [];
     houseRules = state.rules ?? null;
+    rulesExample = state.rulesExample ?? rulesExample;
+    saveFile = state.saveFile ?? saveFile;
+    history = state.history ?? null;
     name = state.name ?? name;
     part("name").textContent = startCard.querySelector('[data-part="start-name"]').textContent = name;
     part("name").title = name;
@@ -277,6 +294,12 @@ export function attachTernleaf(editor) {
     for (const font of fonts) doc.registerFont(font);
     for (const record of journal) doc.replayDurableFrame(JSON.stringify(record.frame));
     await editor.renderAll();
+    // The editor's own status line can keep "Opening <name>…" after the
+    // document is on screen. The document is open now, so remove it.
+    const line = editor.statusEl;
+    if (line && line.textContent.includes(name) && line.textContent.trim().endsWith("…")) {
+      try { editor.setStatus(""); } catch { line.textContent = ""; }
+    }
     doc.enableDurableAdmission();
     globalThis.ternleafProjectAttached = true;
     paintPill();
@@ -293,8 +316,9 @@ export function attachTernleaf(editor) {
     if (draft || batch) setOpen(true);
     render();
     renderHistory();
-    heartbeat = setInterval(() => call("renew", { lease }).catch(error => { blocked = true; report(error); }), 5000);
+    heartbeat = setInterval(() => leaving || call("renew", { lease }).catch(error => { blocked = true; report(error); }), 5000);
     poll = setInterval(() => {
+      if (leaving) return;
       if (!blocked && draft && draft.replacement === null && !draft.declined) {
         void call("reviews", { lease }).then(syncReviews).catch(report);
       }
@@ -367,11 +391,12 @@ export function attachTernleaf(editor) {
   const exportFormats = { docx: ["org.openxmlformats.wordprocessingml.document", "a Word file"],
     pdf: ["application.pdf", "a PDF"], markdown: ["text.markdown", "Markdown"], html: ["text.html", "a web page"],
     text: ["text.plain", "plain text"] };
-  function exportForCopilot(format) {
+  async function exportForCopilot(format) {
     const [id, label] = exportFormats[format] ?? [];
     if (!id) throw refusal("invalid-request");
     const word = format === "docx";
     const output = editor.doc.exportAs(id, !word ? "semantic" : journal.length ? "preserve_when_safe" : "exact_if_unchanged");
+    let content;
     try {
       if (word) {
         // The same check as the author's own Word export. Only the author
@@ -379,15 +404,42 @@ export function attachTernleaf(editor) {
         try { validateDocxExport(output.reportJson, acceptedLosses); }
         catch (error) {
           throw error.decidable ? refusal("export-needs-author")
-            : refusal("export-refused", `It would lose: ${error.features.join(", ")}.`);
+            : refusal("export-refused", `After an edit, the engine does not keep ${lossInWords(error.features)}. The revisions are saved in the canvas.`);
         }
       }
-      const content = output.bytes;
-      let binary = "";
-      for (let at = 0; at < content.length; at += 0x8000) binary += String.fromCharCode(...content.subarray(at, at + 0x8000));
-      tell(`Copilot exported revision ${journal.length} as ${label}.`);
-      return { bytes: btoa(binary), revision: journal.length };
+      content = output.bytes;
     } finally { output.free(); }
+    const revision = journal.length;
+    if (word) content = await compressed(content);
+    let binary = "";
+    for (let at = 0; at < content.length; at += 0x8000) binary += String.fromCharCode(...content.subarray(at, at + 0x8000));
+    tell(`Copilot exported revision ${revision} as ${label}.`);
+    return { bytes: btoa(binary), revision };
+  }
+
+  // The engine writes the entries of an edited Word export without
+  // compression, so the file is about 15 times the size of the source.
+  // Compress them (zip.mjs), then read the result back: each entry must
+  // have the same bytes, and the engine must read the same text as from the
+  // stored file. If any check fails, the stored file is the export. An
+  // unchanged export is the source, byte for byte, and stays as it is.
+  async function compressed(content) {
+    if (!journal.length) return content;
+    try {
+      if (!isStored(content)) return content;
+      const result = await compressZip(content);
+      const [stored, packed] = [readZip(content), readZip(result)];
+      if (stored.length !== packed.length) return content;
+      for (const [index, entry] of stored.entries()) {
+        const [a, b] = [await entryContent(entry), await entryContent(packed[index])];
+        if (entry.name !== packed[index].name || a.length !== b.length || a.some((value, at) => value !== b[at])) return content;
+      }
+      const text = bytesOf => {
+        const copy = openDoc(bytesOf);
+        try { return JSON.stringify(JSON.parse(copy.searchableText()).map(([, value]) => value)); } finally { copy.free(); }
+      };
+      return text(result) === text(content) ? result : content;
+    } catch { return content; }
   }
 
   // ---- Editions ----------------------------------------------------------
@@ -412,11 +464,24 @@ export function attachTernleaf(editor) {
         const before = read();
         replay(state.frames.slice(checked));
         referenceHead = state.frames.length;
-        referenceChanges = passageChanges(before, read());
+        // The passages that changed before a save of the reference to its
+        // file come as text with the record.
+        referenceChanges = combinePassages(edition.carried, passageChanges(before, read()));
       } finally { sample.free(); }
     }
     renderEdition();
     return edition;
+  }
+  // The paragraph of this edition that a change of the reference is linked
+  // to: the author accepted an update of it for an earlier change of the
+  // same paragraph of the reference. Its number is the number that
+  // ternleaf_read gives it. Null when there is no link, or the paragraph is gone.
+  function linkOf(change) {
+    const target = change.node && edition?.links?.[change.node];
+    if (!target) return null;
+    const list = JSON.parse(editor.doc.searchableText()).filter(([, text]) => text.trim());
+    const index = list.findIndex(([node]) => node === target);
+    return index < 0 ? null : { paragraph: index + 1, text: firstWords(list[index][1]) };
   }
   function renderEdition() {
     const section = part("edition");
@@ -425,9 +490,10 @@ export function attachTernleaf(editor) {
     const changed = referenceChanges?.length ?? 0;
     section.dataset.state = changed ? "changed" : "current";
     part("edition-title").textContent = `Edition of ${edition.reference}`;
-    part("edition-state").textContent = referenceChanges === null ? "Comparing with the reference…"
+    part("edition-state").textContent = (referenceChanges === null ? "Comparing with the reference…"
       : changed ? `The reference changed in ${changed} ${changed === 1 ? "passage" : "passages"} since you last checked this edition.`
-      : "The reference did not change since you last checked this edition.";
+      : "The reference did not change since you last checked this edition.")
+      + (edition.lost ? " Ternleaf could not keep the changes from before the last save of the reference to its Word file. Compare this edition with the reference, then mark it as checked." : "");
     part("edition-list").replaceChildren(...(referenceChanges ?? []).slice(0, 4).map(item => {
       const row = document.createElement("li");
       const slip = document.createElement("p");
@@ -435,11 +501,14 @@ export function attachTernleaf(editor) {
       if (item.change === "changed") slip.append(...diffNodes(item.before, item.after));
       else slip.append(Object.assign(document.createElement(item.change === "added" ? "ins" : "del"), { textContent: item.after ?? item.before }));
       row.append(slip);
+      const linked = linkOf(item);
+      if (linked) row.append(Object.assign(document.createElement("p"), { className: "tl-help", textContent: `Linked to: ${linked.text}` }));
       return row;
     }));
     part("edition-more").hidden = changed <= 4;
     part("edition-more").textContent = changed > 4 ? `And ${changed - 4} more.` : "";
-    for (const action of ["edition-ask", "edition-checked"]) button(action).hidden = !changed;
+    button("edition-ask").hidden = !changed;
+    button("edition-checked").hidden = !changed && !edition.lost;
   }
   async function chooseReference() {
     const { selectDialog } = await import("./documents.mjs");
@@ -459,29 +528,84 @@ export function attachTernleaf(editor) {
   }
 
   // Merge a copy that comes back from Word. The name of a Ternleaf export
-  // carries its revision: that revision is the base. The engine compares
-  // the base with the copy, so the result is what changed in Word, and not
-  // what changed here since the export. Each text change becomes a
-  // suggestion in the ordinary review.
+  // carries its revision and its history: that revision is the base. The
+  // engine compares the base with the copy, so the result is what changed
+  // in Word, and not what changed here since the export. Each changed, new
+  // or removed paragraph becomes a suggestion in the ordinary review.
   async function mergeFromWord(content, fileName) {
-    const { exportedRevision, suggestionsFromComparison } = await import("/ternleaf/merge.mjs");
+    const { exportedName, pairParagraphs, suggestionsFromComparison } = await import("/ternleaf/merge.mjs");
     const { diffVersions } = await import("/pkg/casual_doc_wasm.js");
-    const named = exportedRevision(fileName);
-    const base = named !== null && named <= journal.length ? named : journal.length;
-    const sample = openDoc(source);
-    let comparison;
+    const exported = exportedName(fileName);
+    let named = exported.revision;
+    // The histories from the one of the copy to this one. A save to the file
+    // archives a history, and the archive has its source and its journal.
+    let chain = [{ source, frames: journal.map(record => record.frame) }];
+    if (exported.history && exported.history !== history) {
+      const { histories } = await call("archived-history", { lease, history: exported.history });
+      chain = histories.length && named <= histories[0].frames.length
+        ? [...histories.map(item => ({ source: Uint8Array.from(atob(item.source), char => char.charCodeAt(0)), frames: item.frames })), chain[0]]
+        : null;
+    }
+    const scratch = (bytesOf, frames) => {
+      let doc;
+      try {
+        doc = openDoc(bytesOf);
+        for (const font of fonts) doc.registerFont(font);
+        for (const frame of frames) doc.replayDurableFrame(JSON.stringify(frame));
+        return doc;
+      } catch {
+        doc?.free();
+        throw new Error("Ternleaf cannot build the revision that this copy was exported from. Use Review, Compare in the editor to see the changes of the copy.");
+      }
+    };
+    const paragraphsOf = (bytesOf, frames) => {
+      const doc = scratch(bytesOf, frames);
+      try { return JSON.parse(doc.searchableText()); } finally { doc.free(); }
+    };
+    // The IDs of the base, in this history. Null when a history did not
+    // start from the file that the one before it saved.
+    let ids = null;
+    if (chain && chain.length > 1) {
+      ids = pairParagraphs(chain.slice(0, -1).map((item, index) =>
+        [paragraphsOf(item.source, item.frames), paragraphsOf(chain[index + 1].source, [])]));
+      if (!ids) chain = null;
+    }
+    if (!chain) {
+      const agreed = await confirmDialog({ title: "Compare with the document as it is now?",
+        paragraphs: [`${fileName} is from before the last save to the Word file, and Ternleaf cannot build the revision that it was exported from.`,
+          "Ternleaf can compare the copy with the document as it is now. Then the list also shows the changes that you made here after the export, as changes to undo. Check each suggestion."],
+        yes: "Compare with the document now" });
+      if (!agreed) { ready(); return; }
+      chain = [{ source, frames: journal.map(record => record.frame) }];
+      named = null;
+    }
+    const [first] = chain;
+    const base = named !== null && named <= first.frames.length ? named : first.frames.length;
+    const sample = scratch(first.source, first.frames.slice(0, base));
     let found;
     try {
-      for (const font of fonts) sample.registerFont(font);
-      for (const record of journal.slice(0, base)) sample.replayDurableFrame(JSON.stringify(record.frame));
       const output = sample.exportAs("org.openxmlformats.wordprocessingml.document", base ? "preserve_when_safe" : "exact_if_unchanged");
+      let comparison;
       try { comparison = JSON.parse(diffVersions(output.bytes, content)); }
       catch { throw new Error("Ternleaf cannot read this file as a Word document."); }
       finally { output.free(); }
-      found = suggestionsFromComparison(comparison.changes, node => {
+      // The top-level blocks of the base, so that an added paragraph finds
+      // the paragraph before it.
+      const blocks = Array(comparison.left?.blocks ?? 0).fill(null);
+      for (const [node] of JSON.parse(sample.searchableText())) {
+        const index = sample.blockIndexOf(node);
+        if (index >= 0 && index < blocks.length && sample.blockNodeOf(node) === node) blocks[index] = node;
+      }
+      found = suggestionsFromComparison(comparison, node => {
         try { return sample.copyText(node, 0, node, sample.paragraphLength(node)); } catch { return null; }
-      });
+      }, blocks);
     } finally { sample.free(); }
+    if (ids) {
+      // A paragraph that was removed here after the export has no ID now.
+      const all = found.suggestions.length;
+      found.suggestions = found.suggestions.filter(item => ids.has(item.node)).map(item => ({ ...item, node: ids.get(item.node) }));
+      found.other += all - found.suggestions.length;
+    }
     const count = (number, word) => `${number} ${word}${number === 1 ? "" : "s"}`;
     if (!found.suggestions.length) {
       toast(found.other ? `No text changes to merge. ${count(found.other, "other change")}: see Review, Compare.`
@@ -489,8 +613,9 @@ export function attachTernleaf(editor) {
       return;
     }
     const summary = `Changes from ${fileName}, made in Word after revision ${base}`
-      + (named === null ? " (the file name has no revision, so the copy was compared with the document as it is now)" : "") + "."
-      + (found.other ? ` ${count(found.other, "other change")}, such as a new paragraph or formatting, ${found.other === 1 ? "is" : "are"} not in this list: see Review, Compare.` : "");
+      + (chain.length > 1 ? ` of the history before the last save to the Word file` : "")
+      + (named === null ? " (Ternleaf does not know the revision of the copy, so the copy was compared with the document as it is now)" : "") + "."
+      + (found.other ? ` ${count(found.other, "other change")}, such as formatting or a paragraph before the first one, ${found.other === 1 ? "is" : "are"} not in this list: see Review, Compare.` : "");
     syncBatch(await call("merge", { lease, revision: journal.length, summary, changes: found.suggestions }));
     setOpen(true);
     showView("review");
@@ -513,12 +638,25 @@ export function attachTernleaf(editor) {
           if (at < 0 || text.indexOf(find, at + 1) >= 0) throw new Error("the find text is not there once after the earlier changes");
           const start = bytes(text.slice(0, at));
           const change = reviewChange({ node, start, end: start + bytes(find), before: find, replacement });
-          try { checkReviewRun(node, change, sample); } catch { throw new Error("the change touches a link, a tab, a line break or an object"); }
-          applyChange(sample, node, change, "Preview").free();
-        } catch (error) { blocked.push({ index, reason: String(error.message ?? error) }); }
+          checkReviewRun(node, change, sample);
+          try { applyChange(sample, node, change, "Preview").free(); }
+          catch (error) { throw error.sentence ? error : new Error("the engine cannot apply this change"); }
+        } catch (error) { blocked.push({ index, reason: error.sentence || /find text/.test(error.message) ? error.message : "the engine cannot apply this change" }); }
       });
       return { pagesBefore: before.pages, wordsBefore: before.words, pagesAfter: sample.pageCount, wordsAfter: count(sample), blocked };
     } finally { sample.free(); }
+  }
+
+  // Check each change of a list from Copilot as the Review pane does, on
+  // the document as it is now. Nothing changes. The host refuses the
+  // changes that the author could not accept, with the reason.
+  function checkForCopilot(changes) {
+    const blocked = [];
+    (Array.isArray(changes) ? changes : []).forEach(({ node, find, replacement }, index) => {
+      const { reason } = locate({ node, find, replacement });
+      if (reason) blocked.push({ index, reason });
+    });
+    return { blocked };
   }
 
   async function doJob(job) {
@@ -527,23 +665,28 @@ export function attachTernleaf(editor) {
       if (!editor.doc) throw refusal("canvas-not-ready");
       const result = job.kind === "read" ? readForCopilot()
         : job.kind === "page" ? pageForCopilot(job.page)
-        : job.kind === "export" ? exportForCopilot(job.format)
+        : job.kind === "export" ? await exportForCopilot(job.format)
         : job.kind === "measure" ? measureForCopilot(job.changes)
+        : job.kind === "check" ? checkForCopilot(job.changes)
         : job.kind === "reference" ? await (async () => {
           if (!await loadEdition()) throw refusal("no-reference");
           tell("Copilot read the changes of the reference document.");
-          return { reference: edition.reference, checked: edition.checked, head: referenceHead, changes: referenceChanges };
+          return { reference: edition.reference, checked: edition.checked, head: referenceHead,
+            changes: referenceChanges.map(item => ({ ...item, linked: linkOf(item) })) };
         })()
         : (() => { throw refusal("invalid-request"); })();
       answer = { result };
     } catch (error) {
-      answer = { error: error.code ?? "canvas-error", detail: error.code ? error.detail : String(error.message ?? error) };
+      // A sentence of Ternleaf goes to Copilot as it is. The text of an
+      // engine error does not: it says nothing that Copilot can act on.
+      answer = { error: error.code ?? "canvas-error", detail: error.code ? error.detail
+        : error.sentence ? error.message : "The engine reported an error for this job." };
     }
     try { await call("job", { lease, id: job.id, ...answer }); } catch { /* The action reports a canvas that did not answer. */ }
   }
 
   async function pulse() {
-    if (!lease || blocked || pulsing || !editor.doc) return;
+    if (!lease || blocked || pulsing || leaving || !editor.doc) return;
     pulsing = true;
     try {
       const selection = live ?? (stillThere(captured) ? captured : null);
@@ -562,6 +705,7 @@ export function attachTernleaf(editor) {
         if (!first || !houseRules !== !state.rules) {
           houseRules = (await call("history", { lease })).rules;
           checked = { revision: -1, results: [] };
+          renderChecks();
         }
       }
       for (const job of state.jobs) {
@@ -647,6 +791,65 @@ export function attachTernleaf(editor) {
   }
 
   // ---- Review -----------------------------------------------------------
+  // Facts that the engine computes for the whole document, kept for one
+  // revision of the document on screen. A scratch copy asks each time,
+  // because its text changes between the calls.
+  let factsRevision = -1;
+  const facts = new Map();
+  function fact(doc, key, compute) {
+    if (doc !== editor.doc) return compute();
+    if (factsRevision !== journal.length) { facts.clear(); factsRevision = journal.length; }
+    if (!facts.has(key)) facts.set(key, compute());
+    return facts.get(key);
+  }
+  // A refusal with a sentence for the author. Any other error from the
+  // engine is not shown as it is.
+  const refuse = sentence => Object.assign(new Error(sentence), { sentence: true });
+  const cannotRead = "Ternleaf cannot read this part of the document. Discard the proposal, then edit the text in the document.";
+
+  // The number of fields in the document. Without a field, no paragraph
+  // needs the slower check below. On an error, assume that there are fields.
+  const fieldTotal = doc => fact(doc, "fields", () => {
+    try { return Number(JSON.parse(doc.aiRead(JSON.stringify({ tool: "outline" }), "read")).value?.counts?.fields ?? 1); }
+    catch { return 1; }
+  });
+  // The paragraphs of a table of contents: those inside a TOC field, and
+  // those with a style that Word gives to its entries.
+  const contentsNodes = doc => fact(doc, "contents", () => {
+    const nodes = new Set();
+    try {
+      for (const row of doc.fieldRangeSpans()) {
+        const [, instruction = "", list = ""] = String(row).split("\t");
+        if (/^\s*TOC\b/i.test(instruction)) for (const id of list.split(" ")) if (id) nodes.add(id);
+      }
+    } catch { /* An engine without field ranges leaves the style. */ }
+    return nodes;
+  });
+  const inContents = (doc, node) => {
+    if (contentsNodes(doc).has(node)) return true;
+    try { return contentsStyle(doc.paragraphStyleAt(node)); } catch { return false; }
+  };
+  // The byte ranges of the field results in a paragraph, or null when the
+  // engine cannot say: then the preview checks the export (keptInExport).
+  // copyRichRuns gives a field result as plain runs. The assistant read of
+  // the engine names the fields of a paragraph and their results.
+  function fieldResultsOf(doc, node) {
+    return fact(doc, "fields " + node, () => {
+      let block;
+      try { block = JSON.parse(doc.aiRead(JSON.stringify({ tool: "read", start: node, maxTokens: 1 }), "read")).value?.blocks?.[0]; }
+      catch { return null; }
+      // A paragraph in a table cell comes as the whole table, without fields.
+      if (block?.id !== node || block.kind !== "paragraph") return null;
+      const fields = (block.fields ?? []).filter(field => !field.spansParagraphs);
+      if (!fields.length) return [];
+      return fieldRanges(doc.copyText(node, 0, node, doc.paragraphLength(node)),
+        (block.runs ?? []).map(run => String(run.text ?? "")), fields.map(field => String(field.result ?? "")));
+    });
+  }
+  const controlsIn = (doc, node) => fact(doc, "controls", () => {
+    try { return JSON.parse(doc.contentControls()); } catch { return []; }
+  }).filter(control => control.paragraph === node);
+
   // Check that the engine can apply a text change, and say how. The engine
   // gives new text the formatting of the character before it. So that the
   // new text keeps the formatting of the text it replaces, the result names
@@ -654,10 +857,19 @@ export function attachTernleaf(editor) {
   // the character before the change. `mixed` is true when the replaced text
   // has more than one formatting, or when a formatting cannot be carried
   // over: some of it is lost, and the review says so.
-  // A change that touches a link, a tab, a line break or an object is refused.
+  // A change that touches a link, a tab, a line break, an object or a field
+  // result is refused, and so is a change in a table of contents. A change
+  // of all the text of a content control gives `fill`: the editor fills the
+  // control, so that the control stays (controlChange in structure.mjs).
+  // `verify` says that the engine could not show where the fields of the
+  // paragraph are, so the preview must check the export.
   function checkReviewRun(node, change, doc = editor.doc) {
-    const length = doc.paragraphLength(node);
-    const runs = JSON.parse(doc.copyRichRuns(node, 0, node, length));
+    let length, runs;
+    try {
+      length = doc.paragraphLength(node);
+      runs = JSON.parse(doc.copyRichRuns(node, 0, node, length));
+    } catch { throw refuse(cannotRead); }
+    if (inContents(doc, node)) throw refuse(sentences.contents);
     const formatOf = run => Object.fromEntries(Object.entries(run).filter(([key]) => key !== "text" && key !== "paragraphBreak"));
     const signature = format => JSON.stringify(Object.entries(format).sort());
     let end = 0;
@@ -669,12 +881,22 @@ export function attachTernleaf(editor) {
       if (change.start > start && change.start <= end) before = formatOf(run);
       const overlaps = change.end > change.start ? change.start < end && change.end > start : change.start >= start && change.start <= end;
       if (!overlaps) continue;
-      if (run.href || /[\r\n\t\uFFFC]/.test(run.text)) {
-        throw new Error("This change touches a link, a tab, a line break or an object. Ternleaf cannot apply it. Discard it, then select the text beside it.");
-      }
+      if (run.href) throw refuse(sentences.link);
+      if (/\t/.test(run.text)) throw refuse(sentences.tab);
+      if (/[\r\n]/.test(run.text)) throw refuse(sentences.lineBreak);
+      if (/￼/.test(run.text)) throw refuse(sentences.object);
       touched.push(formatOf(run));
     }
-    if (end !== length) throw new Error("This paragraph has content that Ternleaf cannot change. Discard the proposal.");
+    if (end !== length) throw refuse("This paragraph has content that Ternleaf cannot change. Discard the proposal, then edit the text in the document.");
+    let verify = false;
+    if (fieldTotal(doc) > 0) {
+      const ranges = fieldResultsOf(doc, node);
+      if (!ranges) verify = true;
+      else if (ranges.some(range => touches(change, range))) throw refuse(sentences.field);
+    }
+    let control;
+    try { control = controlChange(controlsIn(doc, node), change, Boolean(doc.trackRevisions)); }
+    catch (error) { throw refuse(error.message); }
     const format = touched[0] ?? {};
     const same = !before || signature(before) === signature(format);
     // What the new text must switch off to differ from the text before it.
@@ -682,31 +904,71 @@ export function attachTernleaf(editor) {
     const off = same ? {} : Object.fromEntries(Object.entries(before).filter(([key]) => !(key in format)).map(([key, value]) => [key, value === true ? false : undefined]));
     const lost = Object.values(off).some(value => value === undefined);
     return { format, same, off: Object.fromEntries(Object.entries(off).filter(([, value]) => value !== undefined)),
-      mixed: change.end > change.start && change.inserted !== ""
-        && (touched.some(item => signature(item) !== signature(format)) || lost) };
+      mixed: !control && change.end > change.start && change.inserted !== ""
+        && (touched.some(item => signature(item) !== signature(format)) || lost),
+      fill: control?.fill ?? null, verify };
   }
+
+  // Where a paragraph is: its story (the body, one header or footer, one
+  // note) and its table cell. A paragraph joins only a paragraph in the
+  // same place: the engine refuses a join across stories ("selection
+  // crosses editing surfaces"), and a join across cells is not a removal.
+  function placeOf(doc, node) {
+    try {
+      const edge = doc.storyEdge(node, false);
+      const story = edge.node;
+      edge.free();
+      const cell = doc.cellTextRange(node);
+      try {
+        return { story, cell: cell.found ? cell.startNode + " " + cell.endNode : "",
+          onlyInCell: cell.found && cell.startNode === node && cell.endNode === node };
+      } finally { cell.free(); }
+    } catch { return null; }
+  }
+
+  // A change that deletes all the text of a paragraph removes the paragraph
+  // too, when the paragraph before it is in the same story and the same
+  // table cell: the empty paragraph joins it, and the paragraph before keeps
+  // its own style. Otherwise only the text goes. `effect` is what the review
+  // tells the author: "paragraph", "cell" (the only paragraph of a cell) or
+  // "text" (the empty paragraph stays). Null for any other change.
+  function removalOf(doc, node, change) {
+    if (doc.trackRevisions || change.inserted || change.start !== 0 || !change.end || change.end !== doc.paragraphLength(node)) return null;
+    const here = placeOf(doc, node);
+    if (here?.onlyInCell) return { previous: null, effect: "cell" };
+    const all = JSON.parse(doc.searchableText());
+    const index = all.findIndex(([id]) => id === node);
+    const previous = index > 0 ? all[index - 1][0] : null;
+    const there = previous && here ? placeOf(doc, previous) : null;
+    if (there && there.story === here.story && there.cell === here.cell) return { previous, effect: "paragraph" };
+    return { previous: null, effect: "text" };
+  }
+  const removalText = {
+    paragraph: "This change removes the whole paragraph.",
+    cell: "This change empties the table cell.",
+    text: "This change deletes all the text of the paragraph. The empty paragraph stays, because Ternleaf can join it only to a paragraph before it in the same part of the document.",
+  };
 
   // Apply a reviewed change to a document as one revision. The store checks
   // the frame that the engine makes, so each way to apply a change has a
   // form that the store knows (frameDoesChange).
-  // A change that deletes all the text of a paragraph removes the paragraph
-  // too, when there is a paragraph before it to join it to. The paragraph
-  // before keeps its own style.
-  function paragraphToJoin(doc, node, change) {
-    if (doc.trackRevisions || change.inserted || change.start !== 0 || !change.end || change.end !== doc.paragraphLength(node)) return null;
-    const all = JSON.parse(doc.searchableText());
-    const index = all.findIndex(([id]) => id === node);
-    return index > 0 ? all[index - 1][0] : null;
-  }
-
   function applyChange(doc, node, change, author = null) {
-    const { format, same, off } = checkReviewRun(node, change, doc);
-    const previous = paragraphToJoin(doc, node, change);
-    if (previous) return doc.replaceSelection(previous, doc.paragraphLength(previous), node, change.end, "");
+    const { format, same, off, fill } = checkReviewRun(node, change, doc);
+    const removal = removalOf(doc, node, change);
+    if (removal?.previous) return doc.replaceSelection(removal.previous, doc.paragraphLength(removal.previous), node, change.end, "");
+    // A replacement of all the text of a content control would remove the
+    // control. A fill keeps it, in one revision.
+    if (fill) return doc.fillContentControl(fill.id, JSON.stringify({ text: fill.text }));
     if (doc.trackRevisions) {
       // Suggesting mode: the change becomes a tracked change, for a reader
       // who reviews in Word.
-      if (change.inserted.includes("\n")) throw new Error("Switch from Suggesting to Editing to accept a proposal with a new paragraph.");
+      // The engine has no call that makes a tracked change with a new
+      // paragraph in one revision: suggestReplace keeps a line break as a
+      // character inside the paragraph, pasteRichRuns does not track, and
+      // an AI turn writes the change in three or more revisions.
+      if (change.inserted.includes("\n")) {
+        throw refuse("In Suggesting mode, Ternleaf cannot accept a change with a new paragraph, because the engine cannot record it as one tracked change. Switch to Editing to accept it as a plain change, or edit the proposal so that it has no line break.");
+      }
       // Without `author`, the engine uses the name that the author set for
       // comments and suggestions.
       return doc.suggestReplace(node, change.start, change.end, change.inserted, author, null, null);
@@ -718,6 +980,50 @@ export function attachTernleaf(editor) {
     const runs = change.inserted.split("\n").flatMap((line, index) =>
       [...(index ? [{ text: "", paragraphBreak: true }] : []), ...(line ? [{ ...style, text: line }] : [])]);
     return doc.pasteRichRuns(node, change.start, node, change.end, JSON.stringify(runs));
+  }
+
+  // Apply a change to a scratch copy and get the frame that the engine
+  // makes, so that the preview can ask the store's own question
+  // (frameDoesChange) before the author sees the proposal. The copy's
+  // admission goes to this function for the length of the call only.
+  function frameOf(sample, apply) {
+    const admit = globalThis.ternleafAdmit;
+    let frame = null;
+    globalThis.ternleafAdmit = raw => { try { frame = JSON.parse(raw); } catch { frame = null; } return true; };
+    try {
+      sample.enableDurableAdmission();
+      return { result: apply(), frame: () => frame };
+    } finally { globalThis.ternleafAdmit = admit; }
+  }
+
+  // An edit must keep every field and content control. Where the engine
+  // could not say where the fields of a paragraph are, and as a second
+  // check everywhere, the preview exports the copy with the change and
+  // counts the fields and controls in the part of the paragraph. It does
+  // this only when that part has a field or a control.
+  let exportedCounts = { revision: -1, counts: null };
+  const checkMs = [];
+  async function countsOf(doc) {
+    const output = doc.exportAs(format, "preserve_when_safe");
+    let content;
+    try { content = output.bytes; } finally { output.free(); }
+    return fieldCounts(content);
+  }
+  async function keptInExport(node, sample) {
+    let kind;
+    try { kind = editor.doc.storyKind(node); } catch { kind = "body"; }
+    const started = performance.now();
+    if (exportedCounts.revision !== journal.length) {
+      const revision = journal.length;
+      exportedCounts = { revision, counts: await countsOf(editor.doc) };
+    }
+    const before = exportedCounts.counts[kind];
+    if (!before?.fields && !before?.controls) return;
+    const after = (await countsOf(sample))[kind] ?? { fields: 0, controls: 0 };
+    checkMs.push(performance.now() - started);
+    if (checkMs.length > 64) checkMs.shift();
+    if (after.fields < before.fields) throw refuse(sentences.fieldLost);
+    if (after.controls < before.controls) throw refuse(sentences.controlLost);
   }
 
   async function syncReviews(state, opening = false, force = false) {
@@ -745,7 +1051,11 @@ export function attachTernleaf(editor) {
         problem = "";
         message("Proposal ready to review", "ok");
         setOpen(true);
-      } catch (error) { proposal = undefined; problem = error.message ?? String(error); report(error); }
+      } catch (error) {
+        proposal = undefined;
+        problem = error.sentence ? error.message : "Ternleaf cannot show this proposal on a copy of the document. Discard it, then ask again.";
+        report(new Error(problem));
+      }
     } else if (declined) {
       message("Copilot proposed no change");
       setOpen(true);
@@ -790,13 +1100,13 @@ export function attachTernleaf(editor) {
 
   async function inspectProposal(candidate) {
     if (!candidate || candidate.revision !== journal.length || candidate.fontHash !== fontHash) {
-      throw new Error("The document changed after this proposal. Discard it, then ask again.");
+      throw refuse("The document changed after this proposal. Discard it, then ask again.");
     }
     const { node, start, end, before } = candidate;
-    if (editor.doc.copyText(node, start, node, end) !== before) throw new Error("The passage changed after this proposal. Discard it, then ask again.");
+    if (editor.doc.copyText(node, start, node, end) !== before) throw refuse("The passage changed after this proposal. Discard it, then ask again.");
     const change = reviewChange(candidate);
     const next = { view: "after", whole: false, mixed: checkReviewRun(node, change).mixed, tracked: Boolean(editor.doc.trackRevisions),
-      removes: Boolean(paragraphToJoin(editor.doc, node, change)) };
+      removes: removalOf(editor.doc, node, change)?.effect ?? null };
     const sample = openDoc(source);
     try {
       for (const font of fonts) sample.registerFont(font);
@@ -805,9 +1115,24 @@ export function attachTernleaf(editor) {
       const beforeCanvas = renderPageCanvas(editor.doc, beforePage);
       next.before = { canvas: beforeCanvas,
         focus: mark(beforeCanvas, editor.doc, node, change.start, change.end, beforePage, "#f7c6c0") };
-      const result = applyChange(sample, node, change, "Preview");
-      try { if (result.revision !== candidate.revision + 1) throw new Error("The selected range cannot be edited"); }
+      let applied;
+      try { applied = frameOf(sample, () => applyChange(sample, node, change, "Preview")); }
+      catch (error) {
+        if (error.sentence) throw error;
+        throw refuse("The engine cannot apply this change here. Discard it, then edit the text in the document.");
+      }
+      const { result } = applied;
+      try { if (result.revision !== candidate.revision + 1) throw refuse("The engine cannot apply this change here. Discard it, then edit the text in the document."); }
       finally { result.free(); }
+      // The store accepts only a frame that does exactly the reviewed
+      // change. Ask the same question now, so that the author does not
+      // accept a change that the store then refuses.
+      const frame = applied.frame();
+      if (!frame || !frameDoesChange(frame.forward, node, change, frame.inverse)) {
+        throw refuse(checkReviewRun(node, change).fill ? sentences.controlLost
+          : "Ternleaf cannot apply this change as one checked edit. Discard it, then edit the text in the document.");
+      }
+      await keptInExport(node, sample);
       const [afterPage = 1] = sample.caretRect(node, change.start);
       const afterCanvas = renderPageCanvas(sample, afterPage);
       next.after = { canvas: afterCanvas,
@@ -857,16 +1182,20 @@ export function attachTernleaf(editor) {
       byte => byte.toString(16).padStart(2, "0")).join("");
     if (revision !== journal.length || candidate.fontHash !== fontHash
       || editor.doc.copyText(node, start, node, end) !== before) {
-      throw new Error("The proposal is stale");
+      throw new Error("The document changed after this proposal. Discard it, then ask again.");
     }
     if (pending) throw new Error("Another edit is being accepted");
     await call("review-note", { lease, id, note: authoredNote });
-    if (pending || revision !== journal.length) throw new Error("The proposal is stale");
+    if (pending || revision !== journal.length) throw new Error("The document changed after this proposal. Discard it, then ask again.");
     const change = reviewChange(candidate);
     checkReviewRun(node, change);
     pending = { id, fingerprint, editorial, reviewId: id };
     let result;
     try { result = applyChange(editor.doc, node, change); }
+    catch (error) {
+      if (error.sentence || blocked) throw error;
+      throw new Error("The engine refused this change. The saved revision is unchanged. Discard the proposal, then edit the text in the document.");
+    }
     finally { pending = undefined; }
     if (result.revision !== revision + 1) {
       result.free();
@@ -925,7 +1254,8 @@ export function attachTernleaf(editor) {
 
   // Find a suggestion's text in the document as it is now. Returns the
   // passage, or the reason why the suggestion cannot be applied.
-  function locate(suggestion) {
+  // A remark that becomes a comment only needs its text (`textOnly`).
+  function locate(suggestion, textOnly = false) {
     const { node, find, replacement } = suggestion;
     let text;
     try { text = editor.doc.copyText(node, 0, node, editor.doc.paragraphLength(node)); }
@@ -935,8 +1265,9 @@ export function attachTernleaf(editor) {
     if (text.indexOf(find, at + 1) >= 0) return { reason: "The text occurs more than once in the paragraph." };
     const start = bytes(text.slice(0, at));
     const passage = { node, start, end: start + bytes(find), before: find, revision: journal.length };
+    if (textOnly) return { passage };
     try { checkReviewRun(node, reviewChange({ ...passage, replacement })); }
-    catch { return { reason: "The change touches a link, a tab or an object." }; }
+    catch (error) { return { reason: error.sentence ? error.message : cannotRead }; }
     return { passage };
   }
 
@@ -957,7 +1288,7 @@ export function attachTernleaf(editor) {
       syncBatch(await call("suggestions", { lease }));
       const next = suggestions.find(item => item.state === "open" && item.kind !== "remark" && locate(item).passage);
       if (next) await adopt(next);
-      else if (suggestions.length) message("All suggestions reviewed", "ok");
+      else if (suggestions.length) message("All suggestions reviewed. Your accepted changes are in the History tab.", "ok");
     } catch (error) { report(error); render(); }
   }
 
@@ -1016,7 +1347,7 @@ export function attachTernleaf(editor) {
       part("passage-meta").textContent = `${words} ${words === 1 ? "word" : "words"} selected`;
     } else {
       part("passage-text").textContent = "";
-      part("passage-meta").textContent = hint ? hint + "." : "Select a passage in the document.";
+      part("passage-meta").textContent = hint ? hint + "." : "Select a sentence in the document, or choose Whole document to review all of it.";
     }
     part("passage-meta").dataset.tone = hint ? "problem" : "";
     const whole = scope === "document";
@@ -1029,7 +1360,11 @@ export function attachTernleaf(editor) {
       : "Tell Copilot what to change in the selected text";
     part("compose-help").hidden = whole;
     for (const option of panel.querySelectorAll("[data-scope]")) option.setAttribute("aria-pressed", String(option.dataset.scope === scope));
-    for (const chip of part("chips-selection").querySelectorAll("[data-quick]")) chip.disabled = !has || busy;
+    for (const chip of part("chips-selection").querySelectorAll("[data-quick]")) {
+      chip.disabled = !has || busy;
+      chip.title = has ? quickActions.find(item => item.id === chip.dataset.quick)?.instruction ?? "" : "Select text first.";
+    }
+    part("doc-start").hidden = Boolean(batch);
     for (const chip of part("chips-document").querySelectorAll("[data-quick]")) chip.disabled = busy;
     for (const chip of bubble.querySelectorAll("[data-quick]")) chip.disabled = busy;
     button("request").disabled = busy || !prompt.value.trim() || (!whole && !has);
@@ -1071,7 +1406,8 @@ export function attachTernleaf(editor) {
     part("queue-prompt").textContent = batch.prompt;
     part("queue-prompt").dataset.origin = batchOrigin;
     part("queue-reason").hidden = batch.state !== "declined";
-    part("queue-reason").textContent = batch.reason ?? "";
+    part("queue-reason").textContent = batch.reason?.trim() || "Copilot found nothing to change. Try another review, or ask in the chat.";
+    part("queue-done").hidden = batch.state === "declined" || !suggestions.length || suggestions.some(item => item.state === "open");
     part("queue-list").replaceChildren(...suggestions.map(item => {
       const row = document.createElement("li");
       row.dataset.state = item.state;
@@ -1095,7 +1431,7 @@ export function attachTernleaf(editor) {
         control.dataset.id = item.id;
         control.textContent = item.state === "skipped" ? "Restore" : "Done";
         if (item.state === "skipped") actions.append(Object.assign(document.createElement("span"), { className: "tl-help", textContent: "Done" }));
-        else if (locate({ ...item, replacement: item.find + " " }).passage) {
+        else if (locate(item, true).passage) {
           // Keep the remark with the document, as a Word comment on the text.
           const keep = document.createElement("button");
           keep.type = "button";
@@ -1213,6 +1549,7 @@ export function attachTernleaf(editor) {
       part("mixed").hidden = !preview?.mixed;
       part("tracked").hidden = !preview?.tracked;
       part("removes").hidden = !preview?.removes;
+      part("removes").textContent = removalText[preview?.removes] ?? "";
       part("rationale-text").textContent = draft.rationale ?? "";
       button("save-note").hidden = note.value === draft.note;
       paintPreview();
@@ -1253,10 +1590,25 @@ export function attachTernleaf(editor) {
     }
     return checked.results;
   }
+  // Without house rules, or without checks in them, one quiet line says how
+  // to start. The author can hide it for good.
+  let rulesExample = "examples/ternleaf.rules.example.md";
+  const hintKey = kind => "ternleaf-hide-rules-hint-" + kind;
+  function renderRulesHint() {
+    const kind = !houseRules ? "none" : !houseRules.checks?.length ? "no-checks" : null;
+    let hidden = !kind;
+    try { hidden ||= localStorage.getItem(hintKey(kind)) === "true"; } catch { /* Show the line. */ }
+    part("rules-hint").hidden = hidden || panel.dataset.workspace === "false";
+    part("rules-hint").dataset.kind = kind ?? "";
+    part("rules-hint-text").textContent = kind === "none"
+      ? `No house rules in this project. Copy ${rulesExample} to ternleaf.rules.md, and Ternleaf checks the rules while you write.`
+      : kind ? `Copilot follows ${houseRules.path}. Add a ternleaf block, for example max-pages: 2, and Ternleaf checks it while you write.` : "";
+  }
   function renderChecks() {
+    renderRulesHint();
     const section = part("checks");
-    section.hidden = !houseRules;
-    if (!houseRules) return;
+    section.hidden = !houseRules?.checks?.length;
+    if (section.hidden) return;
     const results = houseChecks();
     const failing = results.filter(result => !result.ok);
     part("checks-title").textContent = !results.length ? "House rules"
@@ -1282,6 +1634,7 @@ export function attachTernleaf(editor) {
     part("history-count").textContent = journal.length ? String(journal.length) : "";
     part("history-empty").hidden = groups.length > 0;
     button("record").hidden = reviewed.length === 0;
+    part("record-empty").hidden = groups.length === 0 || reviewed.length > 0;
     renderChecks();
     list.replaceChildren(...groups.reverse().map(group => {
       const row = document.createElement("li");
@@ -1376,18 +1729,25 @@ export function attachTernleaf(editor) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  // The Word export of the revision on screen, with the engine's report. An
+  // unchanged document exports byte for byte.
+  function wordExport(doc, revision) {
+    try { return doc.exportAs(format, revision ? "preserve_when_safe" : "exact_if_unchanged"); }
+    catch { throw new Error("The engine cannot write this document as a Word file. Your revisions are saved, and PDF export still works."); }
+  }
+
   async function download() {
     const doc = editor.doc;
     if (captureWordComparison) {
       wordEvidence = undefined;
       button("word-evidence").hidden = true;
     }
-    const output = doc.exportAs(format, journal.length ? "preserve_when_safe" : "exact_if_unchanged");
+    const output = wordExport(doc, journal.length);
     try {
       try { validateDocxExport(output.reportJson, acceptedLosses); }
       catch (error) {
         if (!error.decidable) {
-          throw new Error(`Ternleaf cannot export this document as DOCX yet. The export would lose content that the engine does not keep (${error.features.join(", ")}). Your revisions are saved, and PDF export still works.`);
+          throw new Error(`Ternleaf cannot export this document as DOCX after an edit yet. The engine does not keep ${lossInWords(error.features)}. Your revisions are saved, and PDF export still works.`);
         }
         // A known, small loss. The author decides, once for this document.
         const agreed = await confirmDialog({ title: "Export without a legacy part?",
@@ -1396,15 +1756,112 @@ export function attachTernleaf(editor) {
         for (const feature of error.features) acceptedLosses.add(feature);
         validateDocxExport(output.reportJson, acceptedLosses);
       }
-      const content = output.bytes;
+      const revision = journal.length;
+      const content = await compressed(output.bytes);
       const stem = name.replace(/\.docx$/i, "");
-      downloadFile(content, output.mimeType, journal.length ? `${stem}-r${journal.length}.docx` : `${stem}.docx`);
+      downloadFile(content, output.mimeType, `${stem}-r${revision}${history ? "-" + history : ""}.docx`);
       message(`Exported revision ${journal.length} as a Word file`, "ok");
       if (captureWordComparison) {
         wordEvidence = await captureWordEvidence(doc, content, journal.length);
         button("word-evidence").hidden = false;
       }
     } finally { output.free(); }
+  }
+
+  // ---- Save to the file ----------------------------------------------------
+  // The author writes the current revision into the .docx file on disk, so
+  // that git has the current text. The host writes the file, archives the
+  // history and starts a new one from the saved file (apps/host/serve.mjs).
+  const base64 = content => {
+    let binary = "";
+    for (let at = 0; at < content.length; at += 0x8000) binary += String.fromCharCode(...content.subarray(at, at + 0x8000));
+    return btoa(binary);
+  };
+  async function saveToFile() {
+    const doc = editor.doc;
+    const revision = journal.length;
+    let content;
+    // The same check as Export DOCX. If the export is refused, nothing is
+    // sent, so nothing is written.
+    const output = wordExport(doc, revision);
+    try {
+      try { validateDocxExport(output.reportJson, acceptedLosses); }
+      catch (error) {
+        if (!error.decidable) {
+          throw new Error(`Ternleaf cannot save this document to the Word file after an edit yet. The engine does not keep ${lossInWords(error.features)}. Your revisions are saved here, the Word file did not change, and PDF export still works.`);
+        }
+        const agreed = await confirmDialog({ title: "Save without a legacy part?",
+          paragraphs: error.features.map(feature => authorDecides.get(feature)), yes: "Continue" });
+        if (!agreed) { ready(); return; }
+        for (const feature of error.features) acceptedLosses.add(feature);
+        validateDocxExport(output.reportJson, acceptedLosses);
+      }
+      content = output.bytes;
+    } finally { output.free(); }
+    content = await compressed(content);
+    const text = doc.exportAs("text.markdown", "semantic");
+    let markdown;
+    try { markdown = new TextDecoder().decode(text.bytes); } finally { text.free(); }
+    const extra = [saveFile.textCopy && `${name}.md, a text copy for diffs`,
+      saveFile.changeLog && `${name}.changes.md, the log of accepted changes`].filter(Boolean);
+    const agreed = await confirmDialog({ title: "Save to the Word file?",
+      paragraphs: [`Ternleaf writes revision ${revision} into ${name} on disk. The file then has the current text.`,
+        "Ternleaf moves the history up to now to the archive in .ternleaf/archive. A new history starts at revision 0 from the saved file. Undo cannot go back to a revision before the save.",
+        ...(extra.length ? [`Ternleaf also writes ${extra.join(" and ")}, next to the document.`] : []),
+        "Ternleaf does not commit to git. After the save, you get a commit message to copy."],
+      yes: "Save to the Word file" });
+    if (!agreed || journal.length !== revision) { ready(); return; }
+    message("Saving to the Word file…");
+    // From here the host can answer "document-changed" to any call. The
+    // page must not reload before the author saw the commit message.
+    leaving = true;
+    // An edition of this document was checked against a revision of the
+    // history that the save archives. Its unchecked passages go with the
+    // save as text, so that the edition still shows them afterwards.
+    let editions = [];
+    try {
+      const { editions: list } = await call("editions-of", { lease });
+      if (list.some(item => item.checked < revision)) {
+        const sample = openDoc(source);
+        try {
+          const read = () => JSON.parse(sample.searchableText());
+          let at = 0;
+          const now = JSON.parse(doc.searchableText());
+          for (const item of [...list].sort((a, b) => a.checked - b.checked)) {
+            if (item.checked >= revision) continue;
+            for (; at < item.checked; at++) sample.replayDurableFrame(JSON.stringify(journal[at].frame));
+            editions.push({ edition: item.edition, checked: item.checked, changes: combinePassages(item.carried, passageChanges(read(), now)) });
+          }
+        } finally { sample.free(); }
+      }
+      for (const item of list) if (item.checked === revision) editions.push({ edition: item.edition, checked: item.checked, changes: item.carried });
+    } catch { /* Without the lists, the host tells each edition to compare by hand. */ editions = []; }
+    // The saved file gives its paragraphs new IDs when the new history opens
+    // it. The links between passages of editions follow them, and so do
+    // the carried passages.
+    let renamed = null;
+    try {
+      const { pairParagraphs } = await import("/ternleaf/merge.mjs");
+      const saved = openDoc(content);
+      let ids;
+      try { ids = pairParagraphs([[JSON.parse(doc.searchableText()), JSON.parse(saved.searchableText())]]); } finally { saved.free(); }
+      if (ids) {
+        renamed = [...ids];
+        for (const item of editions) {
+          item.changes = (item.changes ?? []).map(({ node, ...change }) => ids.has(node) ? { ...change, node: ids.get(node) } : change);
+        }
+      }
+    } catch { /* Without the pairs, a link stays with the old ID and no longer shows. */ }
+    let result;
+    try { result = await call("save-file", { lease, revision, bytes: base64(content), markdown, editions, renamed }); }
+    catch (error) { leaving = false; throw error; }
+    const written = [result.textCopy, result.changeLog].filter(Boolean);
+    await copyDialog({ title: "Saved to the Word file",
+      paragraphs: [`${result.document} has the text of revision ${result.revisions} now. A new history starts at revision 0.`,
+        ...(written.length ? [`Ternleaf also wrote ${written.join(" and ")}.`] : []),
+        "To keep the save in git, commit these files. Here is a commit message."],
+      label: "Commit message", text: result.commitMessage, copy: "Copy the commit message" });
+    reload();
   }
 
   // ---- Events -----------------------------------------------------------
@@ -1461,9 +1918,11 @@ export function attachTernleaf(editor) {
           // A comment is the author's own edit: it is a revision like any
           // other, and it goes into the Word export.
           const item = suggestions.find(entry => entry.id === target.dataset.id);
-          const { passage } = locate({ ...item, replacement: item.find + " " });
+          const { passage } = locate(item, true);
           if (!passage) throw new Error("The text of this remark changed. Choose Done.");
-          const result = editor.doc.addComment(passage.node, passage.start, passage.node, passage.end, item.rationale, "Copilot", "C", new Date().toISOString());
+          let result;
+          try { result = editor.doc.addComment(passage.node, passage.start, passage.node, passage.end, item.rationale, "Copilot", "C", new Date().toISOString()); }
+          catch { throw new Error("Ternleaf cannot add a comment on this text. Select the text in the document, then add the comment from the Review tab of the editor."); }
           await editor.refresh(result);
           syncBatch(await call("suggestion-state", { lease, id: item.id, state: "skipped" }));
           toast("The remark is now a comment in the document.");
@@ -1553,6 +2012,7 @@ export function attachTernleaf(editor) {
           break;
         case "export": await download(); break;
         case "edition": closeExportMenu(); await chooseReference(); break;
+        case "save-file": closeExportMenu(); await saveToFile(); break;
         case "edition-refresh": await loadEdition(); break;
         case "edition-checked":
           await call("edition-checked", { lease, revision: referenceHead });
@@ -1571,6 +2031,10 @@ export function attachTernleaf(editor) {
           picker.click();
           break;
         }
+        case "hide-rules-hint":
+          try { localStorage.setItem(hintKey(part("rules-hint").dataset.kind), "true"); } catch { /* The line goes for this opening only. */ }
+          part("rules-hint").hidden = true;
+          break;
         case "record": {
           const { changeRecord } = await import("/ternleaf/record.mjs");
           downloadFile(changeRecord({ document: name, revision: journal.length, changes: reviewed }), "text/markdown",
@@ -1668,6 +2132,8 @@ export function attachTernleaf(editor) {
   window.ternleafSession = Object.freeze({
     state: () => ({ head: journal.length, editorial: journal.at(-1)?.editorial.after ?? null }),
     admissionMs: () => admissionMs.slice(),
+    // The time of the preview's export check (keptInExport), in ms.
+    checkMs: () => checkMs.slice(),
     mode,
   });
   start().catch(error => {

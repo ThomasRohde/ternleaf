@@ -31,6 +31,10 @@ Each stage of this plan must add to one of these three, or to the precision of t
 - Every edit is a saved revision with undo, redo, recovery after a reload and an edition note.
 - Export a DOCX, guarded against lost content, or a PDF, Markdown, web page or plain text.
 
+- **Save to the Word file.** The author writes the current revision into the `.docx`, with the loss check. The save is one atomic step and recovers after a crash. It archives the history, writes a Markdown text copy and a change log next to the document, and proposes a commit message. Copilot sees the number of unsaved revisions and cannot save.
+- **Install in any repository.** `node scripts/install.mjs <repository>` installs, updates, checks and removes Ternleaf. Everything goes into `.github/extensions/ternleaf`, plus the skill. A manifest with hashes keeps the script from replacing a file that it did not write or that the team changed.
+- **A corpus of real documents.** `tests/real` has eight documents with fields, numbered headings, merged cells, footnotes, headers, comments, tracked changes and content controls, and a harness with 128 checks. [Word fidelity](Word-Fidelity.md) has the results.
+
 Stage 1 of the plan is also done:
 
 - **House rules.** `ternleaf.rules.md` in the project folder reaches Copilot with every read.
@@ -38,7 +42,7 @@ Stage 1 of the plan is also done:
 - **Fit to length.** Copilot tries its cuts on a copy of the document and gets the real page and word counts before it proposes them.
 - **Change record.** One Markdown file with every accepted change, the request, the reason and the author's note.
 
-The limits: a proposal starts inside one paragraph and cannot join paragraphs, and one document is open in one canvas at a time. [Word fidelity](Word-Fidelity.md) lists what is verified against Word.
+The limits: a proposal starts inside one paragraph and cannot join paragraphs. A change cannot touch a field result or a table of contents entry. After an edit, a document with Word comments or a Word table of contents cannot be written as DOCX. One document is open in one canvas at a time. [Word fidelity](Word-Fidelity.md) lists what is verified against Word.
 
 ## The plan
 
@@ -54,12 +58,15 @@ Done:
 
 - **Remove a paragraph.** A proposal that deletes all the text of a paragraph removes the paragraph.
 
-The store still checks every accepted change: the engine's edit must do exactly the reviewed change, in one of four known forms, or the store refuses it.
+- **No silent loss near structure.** A change over a field result, in a table of contents entry, or across the edge of a content control is refused with a sentence. A change of all the text of a content control fills the control. `ternleaf_suggest` tries each change in the canvas and refuses each item on its own, with the reason. A paragraph removal joins only a paragraph in the same part and cell. An edited Word export is compressed again.
+
+The store still checks every accepted change: the engine's edit must do exactly the reviewed change, in one of five known forms, or the store refuses it.
 
 Open:
 
 1. **Join paragraphs.** A proposal can add paragraphs and remove a whole paragraph. It cannot join two paragraphs, and it cannot remove the first paragraph of a document.
-2. **A tracked change with a new paragraph.** In Suggesting mode, a proposal with a line break is refused.
+2. **A tracked change with a new paragraph.** In Suggesting mode, a proposal with a line break is refused. The prebuilt engine has no call that makes it one tracked revision.
+3. **Engine requests.** After an edit, a document with Word comments or a Word table of contents cannot be written as DOCX. Footnote separators are lost and style IDs become numbers, without a report. Field ranges in table cells are found by a slower check. [Engine requests](Engine-Requests.md) has each one with its reproduction.
 
 ### Stage 3: one source, several readers
 
@@ -67,18 +74,21 @@ Done:
 
 - **Back from Word, first form.** The name of an exported Word file carries its revision. **Merge a copy from Word** compares that revision with the copy that comes back, so only the changes from Word come to the review, one suggestion for each changed paragraph. A change that meets a change made here is shown as a conflict.
 
+- **Back from Word, paragraphs.** New and removed paragraphs come to the review. The name of an export has its history, so a copy from before a save to the file finds its base in the archive.
+- **Editions across a save.** The unchecked passages of the reference stay when the reference is saved to its file.
+- **Passage links.** When the author accepts an update that answers a change of the reference, Ternleaf links the two paragraphs. The next change of that paragraph names the linked paragraph of the edition.
 - **Editions, first form.** A document can be an edition of a reference document. When the reference changes, the Review pane lists the changed passages, and Copilot proposes the updates of the edition through the ordinary review. The author marks the edition as checked.
 
 Open:
 
-3. **Back from Word, the rest.** New and removed paragraphs, formatting and comments from the copy are counted, but not merged. The engine's own Review, Compare shows them.
-4. **Editions, the rest.** See below.
+4. **Back from Word, the rest.** Formatting and comments from the copy are counted, but not merged. The engine's own Review, Compare shows them. A paragraph that changed on both sides is a conflict that the author merges by hand.
+5. **Editions, the rest.** The policies below.
 
 ### All the time: the page
 
-5. **More Word-authored documents.** Other chart types and styling, paragraphs with fields, tabs and breaks, and source XML that the importer drops without a report. Each construct needs a rule for edits and a test before export allows it.
-6. **Performance on long documents.** Measure admission, preview and journal replay separately, and add journal checkpoints.
-7. **Structural agent proposals.** Split, join, move and restyle, with the same review and the same preview.
+6. **More Word-authored documents.** Other chart types and styling, paragraphs with fields, tabs and breaks, and source XML that the importer drops without a report. Each construct needs a rule for edits and a test before export allows it.
+7. **Performance on long documents.** Measure admission, preview and journal replay separately, and add journal checkpoints.
+8. **Structural agent proposals.** Split, join, move and restyle, with the same review and the same preview.
 
 ## Later
 
@@ -92,7 +102,7 @@ An outline of the real document with word counts and page spans. Moving a sectio
 
 ### Editions
 
-The first form is done: an edition knows its reference and the revision that it was checked against, and the changed passages of the reference come up for review. What remains is the record of which passages correspond, and the policies below.
+The first form is done: an edition knows its reference and the revision that it was checked against, and the changed passages of the reference come up for review. The links between passages are recorded when the author accepts an update. What remains is the policies below.
 
 One project with several documents for different readers, for example a technical paper, a two-page decision brief and an implementation note. Each edition owns its prose and layout. The project records which passages correspond and what must stay consistent:
 

@@ -78,6 +78,12 @@ export class ProjectStore {
     if (!this.db.prepare("PRAGMA table_info(suggestions)").all().some(column => column.name === "kind")) {
       this.db.exec("ALTER TABLE suggestions ADD COLUMN kind TEXT");
     }
+    // For an edition: the paragraph of the reference whose change a
+    // suggestion answers. The host fills it in from its own record of the
+    // changes that it gave Copilot.
+    if (!this.db.prepare("PRAGMA table_info(suggestions)").all().some(column => column.name === "answers")) {
+      this.db.exec("ALTER TABLE suggestions ADD COLUMN answers TEXT");
+    }
   }
 
   close() { this.db.close(); }
@@ -294,12 +300,13 @@ export class ProjectStore {
         && (typeof item.remark === "string"
           ? item.remark.trim().length > 0 && item.remark.length <= 600 && item.replacement === undefined
           : validReplacement(item.replacement, item.find))
-        && (item.rationale === undefined || (typeof item.rationale === "string" && item.rationale.length <= 600))),
+        && (item.rationale === undefined || (typeof item.rationale === "string" && item.rationale.length <= 600))
+        && (item.answers === undefined || (typeof item.answers === "string" && /^[a-f0-9]{32}$/.test(item.answers)))),
       "invalid-suggestions");
-      const insert = this.db.prepare("INSERT INTO suggestions (id, batch, position, node, find, replacement, rationale, state, kind) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)");
+      const insert = this.db.prepare("INSERT INTO suggestions (id, batch, position, node, find, replacement, rationale, state, kind, answers) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)");
       list.forEach((item, position) => typeof item.remark === "string"
-        ? insert.run(randomUUID(), id, position, item.node, item.find, "", item.remark.trim(), "remark")
-        : insert.run(randomUUID(), id, position, item.node, item.find, item.replacement, item.rationale?.trim() || null, null));
+        ? insert.run(randomUUID(), id, position, item.node, item.find, "", item.remark.trim(), "remark", null)
+        : insert.run(randomUUID(), id, position, item.node, item.find, item.replacement, item.rationale?.trim() || null, null, item.answers ?? null));
       this.db.prepare("UPDATE batches SET state = 'answered' WHERE id = ?").run(id);
     });
   }
@@ -360,6 +367,14 @@ export class ProjectStore {
     });
   }
 
+  // For an accepted review that came from a suggestion which answers a change
+  // of a reference: that paragraph of the reference, and the paragraph of
+  // this document that the author changed. Null otherwise.
+  answeredReference(reviewId) {
+    const row = this.db.prepare("SELECT reviews.accepted, suggestions.answers, suggestions.node FROM reviews JOIN suggestions ON suggestions.id = reviews.suggestion WHERE reviews.id = ?").get(reviewId);
+    return row?.accepted != null && row.answers ? { reference: row.answers, node: row.node } : null;
+  }
+
   // The reviewed changes behind committed revisions, oldest first.
   acceptedReviews(lease) {
     this.checkLease(lease);
@@ -414,7 +429,7 @@ export class ProjectStore {
           && draft.documentId === this.documentId() && draft.sourceHash === project.source_hash
           && draft.fontHash === fontHash && draft.revision === expected, "stale-review");
         const change = reviewChange(draft);
-        requireThat(command.kind === "edit" && frameDoesChange(frame.forward, draft.node, change)
+        requireThat(command.kind === "edit" && frameDoesChange(frame.forward, draft.node, change, frame.inverse)
           && editorial?.target === draft.node && editorial.note === draft.note, "review-frame-mismatch");
         this.db.prepare("UPDATE reviews SET accepted = ? WHERE id = ?").run(expected + 1, reviewId);
         if (draft.suggestion) {

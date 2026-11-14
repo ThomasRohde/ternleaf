@@ -92,7 +92,7 @@ export function toolAdvice({ toolName, toolArgs }, { project, instances, state }
   if (instances.size && (touchesOpen || source)) {
     state.advised = true;
     return { additionalContext: touchesOpen
-      ? "The .docx file on disk is the original. It does not have the author's saved revisions. For the current text call the canvas action ternleaf_read, for a file ternleaf_export."
+      ? "The .docx file on disk has the text of the last save to the file only. Only the author can save, in the canvas. For the current text call the canvas action ternleaf_read, for a file ternleaf_export."
       : "If you read this to learn how to work with the Ternleaf canvas, you do not need the source: call the canvas action ternleaf_guide." };
   }
   if (!instances.size && /\.docx\b/i.test(args) && (reads || shell)) {

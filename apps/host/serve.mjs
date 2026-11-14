@@ -1,15 +1,21 @@
 import { createServer } from "node:http";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { basename, dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ProjectStore, Rejected } from "../../packages/session/store.mjs";
-import { changeRecord } from "../../packages/session/record.mjs";
+import { changeLog as changeLogText, changeRecord, commitMessage, textCopy as textCopyText } from "../../packages/session/record.mjs";
+import { clearSave, commitSave, finishSave, isDocx, prepareSave, sameFile, settleSave } from "../../packages/session/save.mjs";
 import { ProjectError } from "./project.mjs";
 
 const mime = { ".mjs": "text/javascript", ".js": "text/javascript", ".html": "text/html",
   ".json": "application/json", ".wasm": "application/wasm", ".css": "text/css",
   ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2", ".ttf": "font/ttf" };
+// The identifier of a history: the first characters of the identity of its
+// project file. Each save to the file and each restart makes a new one.
+const historyOf = uuid => String(uuid).replace(/-/g, "").slice(0, 10);
+const historyId = store => historyOf(store.documentId());
 const editorAssets = fileURLToPath(new URL("../editor/", import.meta.url));
 const sessionAssets = fileURLToPath(new URL("../../packages/session/", import.meta.url));
 
@@ -68,11 +74,11 @@ function staticFile(res, root, path, noStore = false) {
 // editor reloads. Without a workspace, the host serves `source` and `state`.
 export async function startHost({ source, state, engine, font, fonts = font ? [font] : [], port = 0,
   askAgent, loseProposalReplyOnce = false, captureWordComparison = false, workspace, restart = false,
-  onDocument, chat = true }) {
+  onDocument, chat = true, textCopy = true, changeLog = true }) {
   const root = realpathSync(engine);
   const ui = realpathSync(editorAssets);
   const fontBytes = fonts.map(path => readFileSync(path));
-  let store, sourceBytes, name, current, opened = false;
+  let store, sourceBytes, name, current, currentState, opened = false;
   // Counts the documents this host has served. The editor sends the number
   // with each call, so a page that still shows an earlier document reloads.
   let epoch = 0;
@@ -90,6 +96,7 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
   let live;                 // What the editor last reported, with the time.
   let stamp = 0;            // Counts changes that began in the chat.
   let snapshot;             // The text Copilot last read: { revision, paragraphs }.
+  let answered = new Map(); // The changes of the reference that Copilot last read: id to paragraph.
   const jobs = new Map();
   const notices = [];       // Lines for the author about what Copilot took.
   const events = [];        // The author's decisions since Copilot last asked.
@@ -118,27 +125,75 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
 
   // Sort suggestions into those the author can review and those that do not
   // match the text. The refused ones go back to the agent with the reason.
+  // Each item is checked here against the rules of the store
+  // (submitSuggestions), so that one bad item cannot fail the whole list.
+  function itemProblem(item, paragraph) {
+    const text = value => typeof value === "string";
+    if (!paragraph) return "unknown paragraph number";
+    if (!text(item.find) || !item.find) return "give the find text, copied from the paragraph";
+    if (/[\t\r\n]/.test(item.find)) return "the find text has a tab or a line break. A change cannot cross it. Give the text before or after it";
+    if (item.find.includes("\uFFFC")) return "the find text has an object, such as a picture or a note reference. A change cannot cross it. Give the text before or after it";
+    if (!paragraph[1].includes(item.find)) return "the find text is not in that paragraph";
+    if (paragraph[1].indexOf(item.find) !== paragraph[1].lastIndexOf(item.find)) return "the find text occurs more than once; give a longer find text";
+    if (item.rationale !== undefined && (!text(item.rationale) || item.rationale.length > 600)) return "give a rationale of at most 600 characters";
+    if (item.remark !== undefined) {
+      if (item.replacement !== undefined) return "give a replacement or a remark, not both";
+      if (!text(item.remark) || !item.remark.trim() || item.remark.length > 600) return "give a remark of 1 to 600 characters";
+      return null;
+    }
+    if (!text(item.replacement)) return "give a replacement text, or a remark";
+    if (item.replacement === item.find) return "the replacement is the same as the find text";
+    if (item.replacement.length > 4000) return "the replacement is longer than 4,000 characters; split the change";
+    if (/[\t\r]/.test(item.replacement)) return "the replacement has a tab. Ternleaf cannot write a tab. Give the text without it";
+    if (item.replacement.includes("\uFFFC")) return "the replacement has an object character. Give plain text";
+    if (item.replacement.split("\n").length > 31) return "the replacement has more than 30 line breaks; split the change";
+    return null;
+  }
   function sortSuggestions(paragraphs, list) {
     const kept = [];
     const refused = [];
     for (const [index, item] of (Array.isArray(list) ? list : []).entries()) {
       const paragraph = paragraphs[item?.paragraph - 1];
-      const reason = !paragraph ? "unknown paragraph number"
-        : typeof item.find !== "string" || !paragraph[1].includes(item.find) ? "the find text is not in that paragraph"
-        : paragraph[1].indexOf(item.find) !== paragraph[1].lastIndexOf(item.find) ? "the find text occurs more than once; give a longer find text"
-        : typeof item.remark === "string" ? (item.replacement !== undefined ? "give a replacement or a remark, not both" : null)
-        : item.replacement === item.find ? "the replacement is the same as the find text" : null;
+      const answers = item?.answers === undefined ? undefined : answered.get(item.answers);
+      const reason = !item || typeof item !== "object" ? "give an object with a paragraph, a find text and a replacement or a remark"
+        : index >= 60 ? "a list has at most 60 items; send the rest after the author reviewed these"
+        : item.answers !== undefined && answers === undefined ? "answers names no change of the last ternleaf_reference_changes result; call it again and copy the id"
+        : itemProblem(item, paragraph);
       if (reason) refused.push({ suggestion: index + 1, reason });
-      else if (typeof item.remark === "string") kept.push({ node: paragraph[0], find: item.find, remark: item.remark });
-      else kept.push({ node: paragraph[0], find: item.find, replacement: item.replacement, rationale: item.rationale });
+      else if (typeof item.remark === "string") kept.push({ node: paragraph[0], find: item.find, remark: item.remark, position: index + 1 });
+      else kept.push({ node: paragraph[0], find: item.find, replacement: item.replacement, rationale: item.rationale,
+        ...(answers ? { answers } : {}), position: index + 1 });
       if (!reason && item.given) kept.at(-1).given = item.given;
     }
-    if (!kept.length) {
-      throw new Rejected("invalid-suggestions", refused.length
-        ? "Refused: " + refused.slice(0, 5).map(item => `suggestion ${item.suggestion}, ${item.reason}`).join("; ") + "."
-        : undefined);
-    }
+    if (!kept.length) throw refusedAll(refused);
     return { kept, refused };
+  }
+  const refusedAll = refused => new Rejected("invalid-suggestions", refused.length
+    ? "Refused: " + refused.slice(0, 5).map(item => `suggestion ${item.suggestion}, ${item.reason.replace(/\.$/, "")}`).join("; ") + "."
+    : undefined);
+
+  // Try each change on the document in the canvas, with the checks of the
+  // Review pane, so that Copilot hears at once about a change that the
+  // author could not accept, as ternleaf_measure does. Such a change is not
+  // shown to the author. Without the canvas, the author sees the reason in
+  // the Review pane instead.
+  async function checkInCanvas(kept, refused) {
+    const changes = kept.filter(item => typeof item.remark !== "string");
+    if (!changes.length || !chat || !present()) return kept;
+    let result;
+    try { result = await editorJob("check", { changes: changes.map(({ node, find, replacement }) => ({ node, find, replacement })) }, 10_000); }
+    catch { return kept; }
+    const out = new Set();
+    for (const { index, reason } of Array.isArray(result?.blocked) ? result.blocked : []) {
+      const item = changes[index];
+      if (!item || out.has(item)) continue;
+      out.add(item);
+      refused.push({ suggestion: item.position, reason: "cannot be applied: " + String(reason).slice(0, 300) });
+    }
+    refused.sort((a, b) => a.suggestion - b.suggestion);
+    const left = kept.filter(item => !out.has(item));
+    if (!left.length) throw refusedAll(refused);
+    return left;
   }
 
   // A proposal from the chat must not take the place of work that the author
@@ -168,6 +223,9 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
   // the .docx changed since its project file was made. The earlier project
   // file moves to .ternleaf/archive.
   function load(settings, { restart = false } = {}) {
+    // A save to the file that a crash stopped is finished or undone first.
+    // A finished save needs the new history that the save would have made.
+    if (settleSave(settings) === "committed") restart = true;
     const bytes = readFileSync(settings.source);
     mkdirSync(dirname(resolve(settings.state)), { recursive: true });
     let next = new ProjectStore(settings.state, { leaseMs: 15_000 });
@@ -177,7 +235,12 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
       if (!(error instanceof Rejected) || error.code !== "source-already-set" || !restart) throw error;
       const archive = resolve(dirname(resolve(settings.state)), "archive");
       mkdirSync(archive, { recursive: true });
-      const stamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15);
+      // Two saves can come in the same second. An archived file is never
+      // replaced, so the name gets a number when it is taken.
+      let stamp = new Date().toISOString().replace(/[-:.]/g, "").slice(0, 18);
+      for (let attempt = 2; existsSync(resolve(archive, `${stamp}-${basename(settings.state)}`)); attempt++) {
+        stamp = stamp.replace(/-\d+$/, "") + "-" + attempt;
+      }
       for (const suffix of ["", "-wal", "-shm"]) {
         if (existsSync(settings.state + suffix)) {
           renameSync(settings.state + suffix, resolve(archive, `${stamp}-${basename(settings.state)}${suffix}`));
@@ -192,17 +255,122 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
       store.close();
     }
     store = next;
+    clearSave(settings);
     sourceBytes = bytes;
     name = basename(settings.source);
     current = settings.source;
+    currentState = settings.state;
     opened = false;
     lease = shared = unanswered = live = snapshot = undefined;
+    answered = new Map();
     events.length = 0;
     dropJobs("document-changed");
     epoch += 1;
     if (epoch > 1) { try { onDocument?.(name); } catch { /* The title is a convenience. */ } }
   }
   load({ source, state }, { restart });
+
+  // The archived histories of the open document, oldest first, from the one
+  // with the identifier `history` to the newest. Each later history started
+  // from the file that the one before it saved, or from a file that changed
+  // on disk; the editor checks which. An empty list: no such history.
+  function archivedHistories(history) {
+    if (!/^[a-f0-9]{10}$/.test(history)) return [];
+    const archive = resolve(dirname(resolve(currentState)), "archive");
+    const own = "-" + basename(currentState);
+    let files = [];
+    try { files = readdirSync(archive).filter(file => file.endsWith(own)); } catch { return []; }
+    // The name starts with the time of the archive. A second archive in the
+    // same time has "-2", "-3" after the time.
+    const order = file => { const [, time, attempt] = /^(\d{8}T\d+)(?:-(\d+))?-/.exec(file) ?? [, file, 1]; return [time, Number(attempt ?? 1)]; };
+    files.sort((a, b) => { const [x, y] = [order(a), order(b)]; return x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : x[1] - y[1]; });
+    const histories = [];
+    for (const file of files) {
+      let db;
+      try {
+        db = new DatabaseSync(resolve(archive, file), { readOnly: true });
+        const project = db.prepare("SELECT source FROM project").get();
+        const identity = db.prepare("SELECT uuid FROM document_identity").get();
+        if (!project || !identity) continue;
+        const id = historyOf(identity.uuid);
+        if (!histories.length && id !== history) continue;
+        histories.push({ history: id, source: Buffer.from(project.source).toString("base64"),
+          frames: db.prepare("SELECT record FROM commits ORDER BY revision").all().map(row => JSON.parse(row.record).frame) });
+      } catch { /* A damaged archive is not a base. */ }
+      finally { db?.close(); }
+    }
+    return histories;
+  }
+
+  // ---- Save to the file ---------------------------------------------------
+  // The author asks Ternleaf to write the current revision into the .docx
+  // file. The project file then goes to the archive, and a new history
+  // starts from the saved file. packages/session/save.mjs says why the
+  // steps come in this order.
+  const saveOptions = () => {
+    let found = { textCopy, changeLog };
+    if (workspace) {
+      try { found = workspace.resolve(current); } catch { /* Keep the options of the host. */ }
+    }
+    return { textCopy: found.textCopy !== false, changeLog: found.changeLog !== false };
+  };
+  function saveToFile(data) {
+    store.checkLease(data.lease);
+    const project = store.project();
+    const head = Number(project.head);
+    if (data.revision !== head) throw new Rejected("stale-revision");
+    const waiting = store.batchState(data.lease);
+    if (store.reviewState(data.lease).draft?.replacement != null
+      || waiting.suggestions.some(item => item.state === "open") || waiting.batch?.state === "waiting") {
+      throw new Rejected("review-in-progress");
+    }
+    const bytes = typeof data.bytes === "string" ? new Uint8Array(Buffer.from(data.bytes, "base64")) : null;
+    if (!isDocx(bytes)) throw new Rejected("not-a-docx");
+    if (typeof data.markdown !== "string") throw new Rejected("invalid-request");
+    // The author, Word or git may have changed the file since Ternleaf
+    // opened it. That change must not be lost under this save.
+    if (!sameFile(current, project.source_hash)) throw new Rejected("file-changed-on-disk");
+
+    const options = saveOptions();
+    const changes = store.acceptedReviews(data.lease);
+    const document = workspace ? workspace.key(current) : name;
+    const files = [];
+    if (options.textCopy) files.push({ path: current + ".md", text: textCopyText(name, data.markdown) });
+    if (options.changeLog) {
+      const path = current + ".changes.md";
+      let existing = "";
+      try { existing = readFileSync(path, "utf8"); } catch { /* The first save makes the log. */ }
+      files.push({ path, text: changeLogText({ document: name, existing, revision: head, changes }) });
+    }
+    const settings = { source: current, state: currentState };
+    try {
+      prepareSave({ ...settings, bytes, files });
+      commitSave(settings);
+    } catch (error) {
+      throw new ProjectError(`Ternleaf could not write ${name} (${error.code ?? error.message}). If the file is open in Word, close it there and save again. Nothing changed.`);
+    }
+    // The .docx has the new text now. What follows can run again after a
+    // crash: load() finishes a save that it finds in progress.
+    finishSave(settings);
+    remember();
+    if (lease) store.release(lease);
+    store.close();
+    store = undefined;
+    try { load(settings, { restart: true }); }
+    catch (error) {
+      console.error(error?.message ?? error);
+      throw new ProjectError(`${name} has the new text, but Ternleaf could not start its new history. Reload the canvas. Ternleaf finishes the save when it opens the document.`);
+    }
+    // An edition counts the revisions of its reference. The reference now
+    // starts again at revision 0, and an edition keeps, as text, the
+    // passages that the author did not check yet (see restartEditionsOf).
+    try { workspace?.restartEditionsOf?.(current, { head, carried: data.editions, renamed: data.renamed }); } catch { /* The editions file is a convenience. */ }
+    const at = path => workspace ? workspace.key(path) : basename(path);
+    return { document, revisions: head, acceptedChanges: changes.length,
+      textCopy: options.textCopy ? at(current + ".md") : null,
+      changeLog: options.changeLog ? at(current + ".changes.md") : null,
+      commitMessage: commitMessage({ document, revision: head, changes }) };
+  }
   const token = randomBytes(32).toString("hex");
   const secret = Buffer.from("Bearer " + token);
   const fontHashes = fontBytes.map(bytes => createHash("sha256").update(bytes).digest("hex"));
@@ -250,7 +418,7 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
           load(workspace.resolve(workspace.create({ name: title, folder: "documents", bytes })));
           return json(res, 200, { name });
         }
-        const data = await body(req, path === "/api/job" ? 96 * 1024 * 1024 : undefined);
+        const data = await body(req, path === "/api/job" ? 96 * 1024 * 1024 : path === "/api/save-file" ? 160 * 1024 * 1024 : undefined);
         const sent = req.headers["x-ternleaf-epoch"];
         if (sent !== undefined && Number(sent) !== epoch) return json(res, 409, { error: "document-changed" });
         switch (path) {
@@ -280,6 +448,7 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
             return json(res, 200, { ...claimed, name, epoch, workspace: Boolean(workspace),
               fontHash, fontCount: fontBytes.length,
               captureWordComparison, reviews: reviews(lease), accepted: store.acceptedReviews(lease), rules: rulesForEditor(),
+              rulesExample: workspace?.rulesExample ?? null, saveFile: saveOptions(), history: historyId(store),
               suggestions: suggestions(lease) });
           }
           case "/api/pulse": {
@@ -316,12 +485,17 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
             return json(res, 200, {});
           }
           case "/api/renew": store.renew(data.lease); return json(res, 200, {});
+          case "/api/save-file": return json(res, 200, saveToFile(data));
           case "/api/release": store.release(data.lease); return json(res, 200, {});
           case "/api/commit": {
             const result = store.publish(data.lease, data.request, undefined, fontHash);
             if (data.request.reviewId && !result.duplicate) {
               const { before, replacement } = store.review(data.request.reviewId);
               note({ decision: "accepted", revision: result.record.revision, before, replacement });
+              // The author accepted a change that answers a change of the
+              // reference: the two paragraphs are linked from now on.
+              const link = store.answeredReference(data.request.reviewId);
+              if (link) { try { workspace?.linkEdition(current, link.reference, link.node); } catch { /* The editions file is a convenience. */ } }
             }
             if (loseProposalReplyOnce && data.request.reviewId && !result.duplicate) {
               loseProposalReplyOnce = false;
@@ -381,6 +555,16 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
             if (!record || !Number.isSafeInteger(data.revision) || data.revision < 0) throw new Rejected("invalid-request");
             note({ decision: "checked", reference: record.reference, revision: data.revision });
             return json(res, 200, { edition: workspace.setEdition(current, record.reference, data.revision) });
+          }
+          case "/api/editions-of":
+            // The editions of this document, so that the editor can keep
+            // their unchecked passages through a save to the file.
+            store.checkLease(data.lease);
+            return json(res, 200, { editions: workspace?.editionsOf(current) ?? [] });
+          case "/api/archived-history": {
+            // A copy from Word that was exported before a save to the file.
+            store.checkLease(data.lease);
+            return json(res, 200, { histories: archivedHistories(String(data.history ?? "")) });
           }
           case "/api/edition-reference": {
             store.checkLease(data.lease);
@@ -503,11 +687,13 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
     // Suggestions for a whole-document request. A suggestion is kept when
     // its find text is in the paragraph that the agent names. The others
     // are reported back, so the agent knows what the author will not see.
-    submitSuggestions(id, list) {
+    async submitSuggestions(id, list) {
       if (shared?.id !== id) throw new Rejected("stale-agent-request");
-      const { kept, refused } = sortSuggestions(shared.paragraphs, list);
+      const sorted = sortSuggestions(shared.paragraphs, list);
+      const kept = await checkInCanvas(sorted.kept, sorted.refused);
+      if (shared?.id !== id) throw new Rejected("stale-agent-request");
       store.submitSuggestions(lease, session, id, kept);
-      return { suggested: kept.length, refused };
+      return { suggested: kept.length, refused: sorted.refused };
     },
     declineProposal(id, reason) {
       if (shared?.id === id) store.declineBatch(lease, session, id, reason);
@@ -550,9 +736,13 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
         canvas: ready ? { ready: true, pages: live.pages, words: live.words, suggestingMode: live.suggesting,
           selection: chat && live.selection && live.selection.revision === head ? { text: live.selection.before } : null }
           : { ready: false },
+        // The .docx on disk has the text of the last save, which is where
+        // this history starts.
+        unsavedRevisions: head,
         request, review, chatAccess: chat, houseRules: workspace?.rules()?.path ?? null,
         ...(ready && live.failing.length ? { failingChecks: live.failing } : {}),
-        ...(edition => edition ? { edition: { ...edition, ...(ready && live.referenceChanges !== null ? { changedPassages: live.referenceChanges } : {}) } } : {})(workspace?.edition(current) ?? null),
+        ...(edition => edition ? { edition: { reference: edition.reference, checked: edition.checked,
+          ...(ready && live.referenceChanges !== null ? { changedPassages: live.referenceChanges } : {}) } } : {})(workspace?.edition(current) ?? null),
       };
     },
     documents() {
@@ -594,10 +784,19 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
     async referenceChanges() {
       if (!workspace?.edition(current)) throw new Rejected("no-reference");
       const result = await editorJob("reference", {}, 40_000);
-      return { reference: String(result.reference), checkedRevision: Number(result.checked), referenceRevision: Number(result.head),
-        changes: (Array.isArray(result.changes) ? result.changes : []).slice(0, 80).map(({ change, before, after }) => ({
-          change: String(change), ...(typeof before === "string" ? { before: before.slice(0, 4000) } : {}),
-          ...(typeof after === "string" ? { after: after.slice(0, 4000) } : {}) })) };
+      // Each change gets an identifier that a suggestion can name in
+      // `answers`. The host keeps which paragraph of the reference it is, so
+      // that Copilot never names a paragraph itself.
+      answered = new Map();
+      const changes = (Array.isArray(result.changes) ? result.changes : []).slice(0, 80).map(({ change, before, after, node, linked }, index) => {
+        const id = "c" + (index + 1);
+        answered.set(id, typeof node === "string" && /^[a-f0-9]{32}$/.test(node) ? node : null);
+        return { id, change: String(change), ...(typeof before === "string" ? { before: before.slice(0, 4000) } : {}),
+          ...(typeof after === "string" ? { after: after.slice(0, 4000) } : {}),
+          ...(Number.isSafeInteger(linked?.paragraph) && typeof linked.text === "string"
+            ? { linkedTo: { paragraph: linked.paragraph, text: linked.text.slice(0, 200) } } : {}) };
+      });
+      return { reference: String(result.reference), checkedRevision: Number(result.checked), referenceRevision: Number(result.head), changes };
     },
     // What the document would be if the author accepted these changes: the
     // engine lays out a copy and counts the pages. Nothing is saved, and the
@@ -640,12 +839,20 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
       return { proposed: true, requestId: scope.id };
     },
     // Suggestions for the document text that Copilot read with `read`.
-    suggestFromChat({ instructions, revision, suggestions: list }) {
+    async suggestFromChat({ instructions, revision, suggestions: list }) {
       checkFree();
-      if (!snapshot || snapshot.revision !== revision || revision !== Number(store.project().head)) {
-        throw new Rejected("stale-document");
-      }
-      const { kept, refused } = sortSuggestions(snapshot.paragraphs, list);
+      const fresh = () => {
+        if (!snapshot || snapshot.revision !== revision || revision !== Number(store.project().head)) throw new Rejected("stale-document");
+      };
+      fresh();
+      // The store checks the instructions too, but only after the canvas
+      // tried the changes. A missing instruction must not wait for that.
+      if (typeof instructions !== "string" || !instructions.trim() || instructions.length > 2000) throw new Rejected("invalid-selection-or-instructions");
+      const sorted = sortSuggestions(snapshot.paragraphs, list);
+      const kept = await checkInCanvas(sorted.kept, sorted.refused);
+      const { refused } = sorted;
+      checkFree();
+      fresh();
       const batch = store.createBatch(lease, session, { revision, prompt: instructions, origin: "chat" });
       try { store.submitSuggestions(lease, session, batch.id, kept); }
       catch (error) { store.discardBatch(lease); throw error; }
@@ -668,7 +875,9 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
       const result = await editorJob("export", { format }, 40_000);
       const bytes = new Uint8Array(Buffer.from(String(result.bytes ?? ""), "base64"));
       const revision = Number(result.revision);
-      const path = workspace.exportFile({ name: `${name.replace(/\.docx$/i, "")}-r${revision}`, extension, bytes });
+      // A Word file carries the history in its name too, so that a copy
+      // that comes back finds its base after a save to the file.
+      const path = workspace.exportFile({ name: `${name.replace(/\.docx$/i, "")}-r${revision}${format === "docx" ? "-" + historyId(store) : ""}`, extension, bytes });
       return { path, format, bytes: bytes.length, revision };
     },
     // The accepted changes behind the revisions, oldest first.

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ProjectStore } from "../packages/session/store.mjs";
-import { validateDocxExport } from "../apps/editor/export-policy.mjs";
+import { lossInWords, validateDocxExport } from "../apps/editor/export-policy.mjs";
 import { reviewChange } from "../packages/session/review-change.mjs";
 
 const source = Buffer.from("immutable source");
@@ -144,4 +144,12 @@ test("head, independently authored editorial delta and receipt recover across pr
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("a refused export names the lost features in words", () => {
+  assert.equal(lossInWords(["annotationRef", "pStyle", "rStyle"]), "parts of the Word comments (the comment marks and the comment styles)");
+  assert.equal(lossInWords(["fldChar", "instrText"]), "a table of contents or another field that spans paragraphs");
+  assert.equal(lossInWords(["annotationRef", "rStyle", "fldChar", "w14:glow"]),
+    "parts of the Word comments (the comment marks and the comment styles), a table of contents or another field that spans paragraphs and other content that the engine does not keep (w14:glow)");
+  assert.equal(lossInWords(["pStyle"]), "other content that the engine does not keep (pStyle)");
 });

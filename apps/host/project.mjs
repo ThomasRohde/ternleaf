@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Rules with a fixed form are checked by Ternleaf itself, without a model.
 // They stand in the rules file in a fenced block with the name ternleaf:
@@ -33,8 +34,23 @@ export function parseChecks(text) {
 export class ProjectError extends Error {}
 
 const inside = (root, path) => path === root || path.startsWith(root + sep);
+// The engine and the introduction come with Ternleaf. In the Ternleaf
+// repository they are in the project folder. In a repository where
+// scripts/install.mjs installed Ternleaf, they are in the extension folder,
+// two folders above this file. The project folder comes first, so a project
+// can bring its own.
+const ternleaf = fileURLToPath(new URL("../..", import.meta.url));
 const engines = ["opendoc", "engine/prebuilt/webapp"];
 const welcome = "examples/welcome-to-ternleaf.docx";
+const findEngine = home => engines.map(path => join(home, path)).find(existsSync)
+  ?? engines.map(path => join(ternleaf, path)).find(path => existsSync(join(path, "editor.html")));
+const introductionFor = home => existsSync(join(home, welcome)) ? welcome : join(ternleaf, welcome);
+// The example rules file, as a path from the project folder, so that the
+// Review pane can name it: examples/ in a clone, the extension folder in a
+// repository where Ternleaf is installed.
+const rulesExample = "examples/ternleaf.rules.example.md";
+const rulesExampleFor = home => existsSync(join(home, rulesExample)) ? rulesExample
+  : relative(home, join(ternleaf, rulesExample)).replaceAll("\\", "/");
 const maxBytes = 64 * 1024 * 1024;
 // Folders that hold tools and build output, never the author's documents.
 const skipped = new Set(["node_modules", "engine", "exports", "opendoc", "dist", "target", "build", "notices"]);
@@ -43,7 +59,8 @@ const skipped = new Set(["node_modules", "engine", "exports", "opendoc", "dist",
 //
 // A document is a .docx file inside the project folder or the session's
 // working directory. Each document has its own project file in `.ternleaf/`,
-// so its revisions stay with it, and the .docx file itself is never changed.
+// so its revisions stay with it. Ternleaf writes the .docx file only when the
+// author chooses Save to the Word file (see apps/host/serve.mjs).
 //
 // `.ternleaf/canvas.json` is optional. It can name the engine, the fonts and
 // a default document. `.ternleaf/workspace.json` is written by Ternleaf. It
@@ -106,7 +123,7 @@ export function createWorkspace({ project, workingDirectory }) {
   function resolveDocument(document) {
     const settings = config();
     const result = {
-      engine: resolve(home, settings.engine ?? engines.find(path => existsSync(join(home, path))) ?? engines[0]),
+      engine: resolve(home, settings.engine ?? findEngine(home) ?? join(ternleaf, engines[1])),
       font: settings.font ? resolve(home, settings.font) : undefined,
       fonts: settings.fonts?.map(path => resolve(home, path)),
       loseProposalReplyOnce: settings.verification?.loseProposalReplyOnce === true,
@@ -114,14 +131,20 @@ export function createWorkspace({ project, workingDirectory }) {
       // With "chat": false, Copilot works only on what the author sends
       // from the canvas. It cannot read the document for a chat request.
       chat: settings.chat !== false,
+      // A save to the Word file also writes <file>.docx.md, a text copy for
+      // diffs, and adds to <file>.docx.changes.md. Each can be turned off.
+      textCopy: settings.textCopy !== false,
+      changeLog: settings.changeLog !== false,
     };
     if (!existsSync(result.engine)) {
-      throw new ProjectError("The OpenDoc engine is missing. Set \"engine\" in .ternleaf/canvas.json. See docs/Install.md.");
+      throw new ProjectError(settings.engine
+        ? `No OpenDoc engine at ${result.engine}, the "engine" path in .ternleaf/canvas.json. Correct the path, or remove "engine" to use the engine that comes with Ternleaf.`
+        : `The OpenDoc engine is missing: no folder ${result.engine}. Install Ternleaf again with "node scripts/install.mjs <repository>" from a Ternleaf release or clone, or set "engine" in .ternleaf/canvas.json.`);
     }
     let source;
     if (document !== undefined && document !== "") source = locate(document);
     else {
-      for (const candidate of [remembered().last, settings.source, welcome]) {
+      for (const candidate of [remembered().last, settings.source, introductionFor(home)]) {
         if (!candidate) continue;
         try { source = locate(candidate); break; }
         catch {
@@ -132,7 +155,7 @@ export function createWorkspace({ project, workingDirectory }) {
         }
       }
       if (!source) {
-        throw new ProjectError("No document to open. Open Ternleaf with a document path, or set \"source\" in .ternleaf/canvas.json.");
+        throw new ProjectError(`No document to open: the introduction ${introductionFor(home)} is missing. Open Ternleaf with the path of a .docx file of this project, for example docs/brief.docx, or install Ternleaf again with "node scripts/install.mjs <repository>".`);
       }
     }
     return { ...result, source, state: stateFor(source, settings), key: key(source) };
@@ -231,9 +254,22 @@ export function createWorkspace({ project, workingDirectory }) {
   function edition(source) {
     const record = editions()[key(source)];
     if (!record || typeof record.reference !== "string" || !Number.isSafeInteger(record.checked)) return null;
-    try { return { reference: key(locate(record.reference)), checked: record.checked }; }
-    catch { return null; }
+    try {
+      return { reference: key(locate(record.reference)), checked: record.checked,
+        ...(Array.isArray(record.carried) && record.carried.length ? { carried: validPassages(record.carried) } : {}),
+        ...(record.lost === true ? { lost: true } : {}),
+        ...(Object.keys(validLinks(record.links)).length ? { links: validLinks(record.links) } : {}) };
+    } catch { return null; }
   }
+  const isNode = value => typeof value === "string" && /^[a-f0-9]{32}$/.test(value);
+  const validLinks = links => Object.fromEntries(Object.entries(links && typeof links === "object" ? links : {})
+    .filter(([from, to]) => isNode(from) && isNode(to)).slice(0, 500));
+  const writeEditions = all => {
+    try {
+      mkdirSync(dirname(editionsFile), { recursive: true });
+      writeFileSync(editionsFile, JSON.stringify(all, null, 2) + "\n");
+    } catch (error) { throw new ProjectError("The edition could not be saved: " + error.code); }
+  };
   // Set, change or (with no reference) remove the record of one document.
   function setEdition(source, reference, checked = 0) {
     const all = editions();
@@ -242,13 +278,81 @@ export function createWorkspace({ project, workingDirectory }) {
       const target = locate(reference);
       if (target === source) throw new ProjectError("A document cannot be an edition of itself.");
       if (editions()[key(target)]) throw new ProjectError("That document is an edition itself. Choose its reference.");
-      all[key(source)] = { reference: key(target), checked };
+      // The links between passages stay while the reference stays.
+      const links = all[key(source)]?.reference === key(target) ? validLinks(all[key(source)].links) : {};
+      all[key(source)] = { reference: key(target), checked, ...(Object.keys(links).length ? { links } : {}) };
     }
-    try {
-      mkdirSync(dirname(editionsFile), { recursive: true });
-      writeFileSync(editionsFile, JSON.stringify(all, null, 2) + "\n");
-    } catch (error) { throw new ProjectError("The edition could not be saved: " + error.code); }
+    writeEditions(all);
     return edition(source);
+  }
+  // The author accepted a change of the edition that answers a change of a
+  // paragraph of the reference. The host calls this from the accepted
+  // review, never from Copilot's word alone. A newer link for the same
+  // paragraph of the reference replaces the older one.
+  function linkEdition(source, referenceNode, editionNode) {
+    const all = editions();
+    const record = all[key(source)];
+    if (!record || !isNode(referenceNode) || !isNode(editionNode)) return null;
+    const links = validLinks(record.links);
+    delete links[referenceNode];
+    record.links = validLinks({ [referenceNode]: editionNode, ...links });
+    writeEditions(all);
+    return edition(source);
+  }
+  // A save to the file starts a new history for a document, at revision 0.
+  // An edition of it was checked against a revision of the old history, so
+  // it starts again at 0 too. The passages that changed in the old history
+  // after that check are not in the new one, so the record keeps them as
+  // text (`carried`), and the Review pane shows them with the later changes.
+  // A list of text is the simplest record that is still correct: the old
+  // history is in the archive, but the paragraph IDs of the saved file are
+  // new, so a comparison across the two histories cannot pair passages by
+  // ID. The editor of the reference makes the list before the save, because
+  // only the engine can read a revision. `carried` is [{ edition, checked,
+  // changes }]. An edition without a list, with changes after its check,
+  // gets `lost`, so the author is told to compare it by hand.
+  // `renamed` pairs the paragraph IDs of the last revision with the IDs that
+  // the saved file gets, so that the links between passages stay: as keys in
+  // the editions of this document, and as values in its own record.
+  function restartEditionsOf(source, { head = 0, carried = [], renamed = null } = {}) {
+    const all = editions();
+    const mine = key(source);
+    const names = new Map((Array.isArray(renamed) ? renamed : []).filter(pair => Array.isArray(pair) && isNode(pair[0]) && isNode(pair[1])));
+    const rename = (links, side) => Object.fromEntries(Object.entries(validLinks(links)).flatMap(([from, to]) => {
+      const value = side === "from" ? names.get(from) : names.get(to);
+      return value ? [side === "from" ? [value, to] : [from, value]] : [];
+    }));
+    let changed = false;
+    if (Array.isArray(renamed) && all[mine]?.links) {
+      all[mine].links = rename(all[mine].links, "to");
+      changed = true;
+    }
+    for (const [path, record] of Object.entries(all)) {
+      if (record?.reference !== mine) continue;
+      if (Array.isArray(renamed) && record.links) record.links = rename(record.links, "from");
+      const given = (Array.isArray(carried) ? carried : []).find(item => item?.edition === path && item.checked === record.checked);
+      if (given) {
+        const changes = validPassages(given.changes);
+        if (changes.length) record.carried = changes;
+        else delete record.carried;
+      } else if (record.checked !== head || record.carried?.length) record.lost = true;
+      record.checked = 0;
+      changed = true;
+    }
+    if (changed) writeEditions(all);
+  }
+  // The editions of a reference, for the editor before a save.
+  function editionsOf(source) {
+    const mine = key(source);
+    return Object.entries(editions()).filter(([, record]) => record?.reference === mine && Number.isSafeInteger(record.checked))
+      .map(([path, record]) => ({ edition: path, checked: record.checked, carried: validPassages(record.carried) }));
+  }
+  // The passages of a reference as text, in the form of passageChanges.
+  function validPassages(list) {
+    return (Array.isArray(list) ? list : []).slice(0, 200).filter(item => item && ["added", "changed", "removed"].includes(item.change)
+      && ["before", "after"].every(side => item[side] === undefined || typeof item[side] === "string"))
+      .map(({ change, before, after, node: at }) => ({ change, ...(before !== undefined ? { before: before.slice(0, 4000) } : {}),
+        ...(after !== undefined ? { after: after.slice(0, 4000) } : {}), ...(isNode(at) ? { node: at } : {}) }));
   }
   // The reference as the editor needs it to compare two of its revisions:
   // the source file and the saved edits, read without a change to them.
@@ -304,7 +408,7 @@ export function createWorkspace({ project, workingDirectory }) {
   // every canvas of the project, so the editor keeps one origin.
   const port = 42000 + (Number.parseInt(createHash("sha256").update(home).digest("hex").slice(0, 8), 16) % 16000);
 
-  return { resolve: resolveDocument, documents, remember, create, exportFile, rules, edition, setEdition, referenceState, key, project: home, welcome, port };
+  return { resolve: resolveDocument, documents, remember, create, exportFile, rules, edition, setEdition, linkEdition, editionsOf, restartEditionsOf, referenceState, key, project: home, welcome: introductionFor(home), rulesExample: rulesExampleFor(home), port };
 }
 
 // The settings for one canvas. See createWorkspace.

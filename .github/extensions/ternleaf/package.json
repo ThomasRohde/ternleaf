@@ -4,5 +4,6 @@
   "private": true,
   "type": "module",
   "main": "./extension.mjs",
+  "engines": { "node": ">=24" },
   "dependencies": { "@github/copilot-sdk": "1.0.31" }
 }

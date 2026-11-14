@@ -81,11 +81,14 @@ export function layout() {
             <ul data-part="checks-list"></ul>
             <p class="tl-help" data-part="checks-file"></p>
           </section>
+          <p class="tl-help tl-hint" data-part="rules-hint" hidden><span data-part="rules-hint-text"></span>
+            <button type="button" class="tl-link" data-action="hide-rules-hint" title="Do not show this line again">Hide</button></p>
           <section class="tl-queue" data-part="queue" hidden>
             <header>
               <h3 data-part="queue-title"></h3>
               <button type="button" class="tl-link" data-action="discard-batch">Dismiss all</button>
             </header>
+            <p class="tl-help" data-part="queue-done" hidden>Your accepted changes are in the History tab.</p>
             <p class="tl-asked" data-part="queue-prompt"></p>
             <p class="tl-queue-reason" data-part="queue-reason" hidden></p>
             <ol data-part="queue-list"></ol>
@@ -96,9 +99,10 @@ export function layout() {
           </div>
           <figure class="tl-passage" data-part="passage" data-empty="true">
             <blockquote class="tl-quote" data-part="passage-text"></blockquote>
-            <figcaption data-part="passage-meta">Select a passage in the document.</figcaption>
+            <figcaption data-part="passage-meta">Select a sentence in the document, or choose Whole document to review all of it.</figcaption>
           </figure>
-          <p class="tl-doc-note" data-part="doc-note" hidden>Copilot reads the text of the whole document for this request and returns suggestions. You review each one before it changes the document.</p>
+          <p class="tl-doc-note" data-part="doc-note" hidden>Copilot reads the text of the whole document for this request and returns suggestions. You review each one before it changes the document.
+            <span data-part="doc-start">Choose a review below, or write what Copilot must look for.</span></p>
           <div class="tl-chips" role="group" aria-label="Quick requests" data-part="chips-selection">${chips()}</div>
           <div class="tl-chips" role="group" aria-label="Quick document reviews" data-part="chips-document" hidden>${documentActions.map(chip).join("")}</div>
           <div class="tl-chips tl-recent" role="group" aria-label="Recent instructions" data-part="recent" hidden></div>
@@ -174,7 +178,8 @@ export function layout() {
         </div>
       </section>
       <section role="tabpanel" id="tl-view-history" data-view="history" aria-labelledby="tl-tab-history" hidden>
-        <p class="tl-help" data-part="history-empty">No saved changes yet. Each edit and each accepted proposal becomes a revision.</p>
+        <p class="tl-help" data-part="history-empty">No changes yet. Each edit and each accepted proposal becomes a revision here, with its request and its reason.</p>
+        <p class="tl-help" data-part="record-empty" hidden>The change record lists accepted Copilot changes. Accept a proposal to start it.</p>
         <button type="button" class="tl-link" data-action="record" hidden
           title="A Markdown file with every accepted change: the request, the reason, the text before and after, and your note.">Download the change record</button>
         <ol class="tl-history" data-part="history"></ol>
@@ -193,9 +198,11 @@ export function layout() {
           <button type="button" role="menuitem" data-action="export-as" data-command="file.export.html">Web page</button>
           <button type="button" role="menuitem" data-action="export-as" data-command="file.export.text">Plain text</button>
           <button type="button" role="menuitem" data-action="edition" class="tl-menu-rule"
-            title="Link this document to a reference document. Ternleaf then shows you when the reference changes.">Make this an edition of…</button>
+            title="For a brief of a longer paper: Ternleaf then shows you when the paper changes.">Make this an edition of…</button>
           <button type="button" role="menuitem" data-action="merge"
             title="Choose a Word file that was exported here and edited in Word. Its changes come to the review.">Merge a copy from Word…</button>
+          <button type="button" role="menuitem" data-action="save-file" class="tl-menu-rule"
+            title="Write the current revision into the .docx file on disk, so that git has the current text. A new history starts from the saved file.">Save to the Word file…</button>
         </div>
       </div>
       <button type="button" class="tl-link" data-action="word-evidence" hidden>Download Word comparison data</button>

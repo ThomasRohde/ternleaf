@@ -51,6 +51,43 @@ export function confirmDialog({ title, paragraphs, yes, no = "Cancel" }) {
   });
 }
 
+// A window with a text for the author to copy, for example a commit
+// message. Resolves when the author closes it.
+export function copyDialog({ title, paragraphs, label, text, copy, done = "Close" }) {
+  const element = dialog("ternleaf-copy", title, `
+    <header><h2>${escape(title)}</h2></header>
+    <div class="tl-confirm">${paragraphs.map(line => `<p>${escape(line)}</p>`).join("")}
+      <label class="tl-field"><span>${escape(label)}</span>
+        <textarea data-part="text" rows="${Math.min(12, text.split("\n").length + 1)}" readonly spellcheck="false">${escape(text)}</textarea>
+      </label>
+      <p class="tl-help" data-part="copied" role="status"></p>
+    </div>
+    <footer>
+      <button type="button" class="tl-button tl-primary" data-do="copy">${escape(copy)}</button>
+      <button type="button" class="tl-button" data-do="done">${escape(done)}</button>
+    </footer>`);
+  const field = element.querySelector('[data-part="text"]');
+  return new Promise(resolve => {
+    element.addEventListener("click", async event => {
+      const choice = event.target.closest("[data-do]")?.dataset.do;
+      if (choice === "done") element.close();
+      if (choice !== "copy") return;
+      let copied = false;
+      try { await navigator.clipboard.writeText(text); copied = true; }
+      catch {
+        // A canvas can refuse the clipboard. The selected text is the way out.
+        field.select();
+        try { copied = document.execCommand("copy"); } catch { /* The text stays selected. */ }
+      }
+      element.querySelector('[data-part="copied"]').textContent = copied
+        ? "Copied." : "Ternleaf could not copy. The text is selected: press Ctrl+C.";
+    });
+    element.addEventListener("close", () => { element.remove(); resolve(); });
+    element.showModal();
+    element.querySelector('[data-do="copy"]').focus();
+  });
+}
+
 // A window with one choice from a list. Resolves to the chosen value, or to
 // undefined when the author cancels.
 export function selectDialog({ title, paragraphs, label, options, value, yes, no = "Cancel" }) {

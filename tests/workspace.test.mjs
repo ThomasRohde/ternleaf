@@ -119,3 +119,172 @@ test("one canvas opens, makes and adds documents, and a page on an earlier docum
     rmSync(folder, { recursive: true, force: true });
   }
 });
+
+test("the author saves to the Word file: the file, its text copy and change log, the archive and a new history", async () => {
+  const folder = project();
+  // Enough of a Word package for the host's check: a ZIP with a main part.
+  const word = text => Buffer.concat([Buffer.from([0x50, 0x4b, 3, 4]), Buffer.from(`[Content_Types].xml word/document.xml ${text}`)]);
+  const brief = join(folder, "docs/Brief.docx");
+  writeFileSync(brief, word("brief"));
+  const workspace = createWorkspace({ project: folder });
+  let host = await startHost({ ...workspace.resolve("docs/Brief.docx"), workspace, port: 0, askAgent: () => {} });
+  try {
+    let origin = new URL(host.url).origin;
+    let token = new URL(host.url).hash.slice(1);
+    let epoch;
+    const post = async (path, data) => {
+      const response = await fetch(origin + "/api/" + path, { method: "POST", body: JSON.stringify(data),
+        headers: { Authorization: "Bearer " + token, "Content-Type": "application/json",
+          ...(epoch === undefined ? {} : { "X-Ternleaf-Epoch": String(epoch) }) } });
+      return { status: response.status, ...await response.json() };
+    };
+    let claimed = await post("claim", { previous: null });
+    let lease = claimed.lease;
+    epoch = claimed.epoch;
+    assert.deepEqual(claimed.saveFile, { textCopy: true, changeLog: true });
+    const firstHistory = claimed.history;
+    assert.match(firstHistory, /^[a-f0-9]{10}$/);
+    // One accepted change and one typed edit.
+    const node = "a".repeat(32);
+    const asked = await post("ask", { lease, scope: { node, start: 0, end: 4, before: "KEEP", revision: 0, prompt: "Use HOLD.", note: "" } });
+    host.submitProposal(asked.id, "HOLD", "The author asked for HOLD.");
+    const forward = [{ DeleteText: { range: { start: { node, offset: 0 }, end: { node, offset: 4 } } } }, { InsertText: { at: { node, offset: 0 }, text: "HOLD" } }];
+    assert.equal((await post("commit", { lease, request: { id: asked.id, fingerprint: "f1", expected: 0, command: { kind: "edit" },
+      frame: { base: 0, revision: 1, forward, inverse: ["x"] }, editorial: { target: node, note: "" }, reviewId: asked.id } })).status, 200);
+    assert.equal((await post("commit", { lease, request: { id: "typed", fingerprint: "f2", expected: 1, command: { kind: "edit" },
+      frame: { base: 1, revision: 2, forward: ["typed"], inverse: ["x"] } } })).status, 200);
+    assert.equal(host.status().unsavedRevisions, 2);
+
+    const saved = word("saved at revision 2");
+    const save = extra => post("save-file", { lease, revision: 2, bytes: saved.toString("base64"), markdown: "# Brief\n\nHOLD the line.\n", ...extra });
+    const archived = () => existsSync(join(folder, ".ternleaf/archive")) ? readdirSync(join(folder, ".ternleaf/archive")).filter(name => name.endsWith(".sqlite")).length : 0;
+    const untouched = () => {
+      assert.equal(readFileSync(brief, "utf8").slice(4), "[Content_Types].xml word/document.xml brief");
+      assert.equal(host.status().document.revision, 2);
+      assert.equal(archived(), 0);
+    };
+    // Refusals write nothing.
+    assert.deepEqual(await save({ bytes: Buffer.from("not a word file at all, only text").toString("base64") }), { status: 409, error: "not-a-docx" });
+    assert.deepEqual(await save({ revision: 1 }), { status: 409, error: "stale-revision" });
+    writeFileSync(brief, word("edited in Word"));
+    assert.deepEqual(await save(), { status: 409, error: "file-changed-on-disk" });
+    writeFileSync(brief, word("brief"));
+    untouched();
+    assert(!existsSync(brief + ".md") && !existsSync(brief + ".changes.md"));
+    assert.deepEqual(readdirSync(join(folder, "docs")).filter(name => name.startsWith(".")), []);
+
+    // Two editions of the brief were checked at revision 1. The editor sends
+    // the unchecked passages of one of them with the save.
+    const minutes = join(folder, "docs/notes/Minutes.docx");
+    const welcome = join(folder, "examples/welcome-to-ternleaf.docx");
+    workspace.setEdition(minutes, "docs/Brief.docx", 1);
+    workspace.setEdition(welcome, "docs/Brief.docx", 1);
+    assert.deepEqual((await post("editions-of", { lease })).editions, [
+      { edition: "docs/notes/Minutes.docx", checked: 1, carried: [] }, { edition: "examples/welcome-to-ternleaf.docx", checked: 1, carried: [] }]);
+    const passage = { change: "changed", before: "KEEP the line.", after: "HOLD the line." };
+    const result = await save({ editions: [{ edition: "docs/notes/Minutes.docx", checked: 1, changes: [passage, { change: "moved" }] }] });
+    assert.equal(result.status, 200, JSON.stringify(result));
+    assert.deepEqual(workspace.edition(minutes), { reference: "docs/Brief.docx", checked: 0, carried: [passage] });
+    assert.deepEqual(workspace.edition(welcome), { reference: "docs/Brief.docx", checked: 0, lost: true });
+    // Marking an edition as checked ends both.
+    workspace.setEdition(welcome, "docs/Brief.docx", 0);
+    assert.deepEqual(workspace.edition(welcome), { reference: "docs/Brief.docx", checked: 0 });
+    assert.deepEqual([result.document, result.revisions, result.acceptedChanges, result.textCopy, result.changeLog],
+      ["docs/Brief.docx", 2, 1, "docs/Brief.docx.md", "docs/Brief.docx.changes.md"]);
+    assert.equal(result.commitMessage, 'Update docs/Brief.docx: 1 accepted change, 2 revisions\n\n- "KEEP" → "HOLD" (revision 1)');
+    assert.deepEqual(readFileSync(brief), saved);
+    const copy = readFileSync(brief + ".md", "utf8");
+    assert.match(copy.split("\n")[0], /^<!-- Ternleaf writes this file from Brief\.docx .*Do not edit this file.* -->$/);
+    assert(copy.includes("HOLD the line."));
+    const log = readFileSync(brief + ".changes.md", "utf8");
+    assert.match(log, /^<!-- [^\n]*Do not edit this file\. -->\n\n# Change log: Brief\.docx\n[\s\S]*## Saved \d{4}-\d\d-\d\d \d\d:\d\d UTC: 2 revisions, 1 accepted change\n[\s\S]*Request \(from the canvas\): Use HOLD\.[\s\S]*> KEEP[\s\S]*> HOLD/);
+    assert.equal(archived(), 1);
+    assert.deepEqual(readdirSync(join(folder, "docs")).filter(name => name.startsWith(".")), []);
+    assert.deepEqual(readdirSync(join(folder, ".ternleaf")).filter(name => name.includes(".save")), []);
+    // The page on the earlier history reloads, and the new history starts
+    // at revision 0 from the saved file.
+    assert.deepEqual(await post("renew", { lease }), { status: 409, error: "document-changed" });
+    epoch = undefined;
+    claimed = await post("claim", { previous: null });
+    ({ lease, epoch } = claimed);
+    assert.deepEqual([claimed.head, claimed.journal, claimed.accepted], [0, [], []]);
+    assert.equal(host.status().unsavedRevisions, 0);
+    const source = await fetch(origin + "/api/source", { headers: { Authorization: "Bearer " + token } });
+    assert.deepEqual(Buffer.from(await source.arrayBuffer()), saved);
+    // A Word copy from the first history finds it in the archive.
+    assert.notEqual(claimed.history, firstHistory);
+    const [old, ...later] = (await post("archived-history", { lease, history: firstHistory })).histories;
+    assert.deepEqual([old.history, old.frames.length, Buffer.from(old.source, "base64").toString("utf8").slice(4), later],
+      [firstHistory, 2, "[Content_Types].xml word/document.xml brief", []]);
+    assert.deepEqual((await post("archived-history", { lease, history: claimed.history })).histories, []);
+    assert.deepEqual((await post("archived-history", { lease, history: "../x" })).histories, []);
+
+    // A second save adds a section to the change log.
+    assert.equal((await post("commit", { lease, request: { id: "typed-2", fingerprint: "f3", expected: 0, command: { kind: "edit" },
+      frame: { base: 0, revision: 1, forward: ["typed"], inverse: ["x"] } } })).status, 200);
+    const again = await post("save-file", { lease, revision: 1, bytes: word("second").toString("base64"), markdown: "Second.",
+      editions: [{ edition: "docs/notes/Minutes.docx", checked: 0, changes: [{ change: "changed", before: "KEEP the line.", after: "HOLD it." }] }] });
+    assert.deepEqual(workspace.edition(minutes).carried, [{ change: "changed", before: "KEEP the line.", after: "HOLD it." }]);
+    // The welcome edition was checked at 0, and the history had 1 revision.
+    assert.equal(workspace.edition(welcome).lost, true);
+    assert.equal(again.commitMessage, "Update docs/Brief.docx: no accepted changes, 1 revision");
+    const longer = readFileSync(brief + ".changes.md", "utf8");
+    assert(longer.startsWith(log.trimEnd()));
+    assert.match(longer.slice(log.trimEnd().length), /## Saved [^\n]*: 1 revision, 0 accepted changes\n\nNo accepted changes in this save\./);
+    assert.equal(readFileSync(brief + ".md", "utf8").split("\n").slice(2).join("\n"), "Second.\n");
+    assert.equal(archived(), 2);
+
+    // A project can turn the two Markdown files off.
+    writeFileSync(join(folder, ".ternleaf/canvas.json"), JSON.stringify({ textCopy: false, changeLog: false }));
+    epoch = undefined;
+    ({ lease, epoch } = await post("claim", { previous: null }));
+    assert.equal((await post("archived-history", { lease, history: firstHistory })).histories.length, 2);
+    const quiet = await post("save-file", { lease, revision: 0, bytes: word("third").toString("base64"), markdown: "Third." });
+    assert.deepEqual([quiet.status, quiet.textCopy, quiet.changeLog], [200, null, null]);
+    assert.equal(readFileSync(brief, "utf8").slice(-5), "third");
+    assert.equal(readFileSync(brief + ".md", "utf8").split("\n").slice(2).join("\n"), "Second.\n");
+    assert.equal(readFileSync(brief + ".changes.md", "utf8"), longer);
+    assert.equal(archived(), 3);
+  } finally {
+    await host.close();
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("a save that a crash stopped is finished or undone when the document opens again", async () => {
+  const folder = project();
+  const word = text => Buffer.concat([Buffer.from([0x50, 0x4b, 3, 4]), Buffer.from(`[Content_Types].xml word/document.xml ${text}`)]);
+  const brief = join(folder, "docs/Brief.docx");
+  writeFileSync(brief, word("brief"));
+  const workspace = createWorkspace({ project: folder });
+  const settings = workspace.resolve("docs/Brief.docx");
+  const { prepareSave, commitSave } = await import("../packages/session/save.mjs");
+  const head = async () => {
+    const host = await startHost({ ...settings, workspace, port: 0 });
+    try { return host.status().document.revision; } finally { await host.close(); }
+  };
+  try {
+    // A project with one revision.
+    const { ProjectStore } = await import("../packages/session/store.mjs");
+    mkdirSync(join(folder, ".ternleaf"), { recursive: true });
+    const store = new ProjectStore(settings.state);
+    store.initialize(word("brief"));
+    const { lease } = store.claim();
+    store.publish(lease, { id: "a", fingerprint: "a", expected: 0, command: { kind: "edit" }, frame: { base: 0, revision: 1, forward: ["x"], inverse: ["y"] } });
+    store.release(lease);
+    store.close();
+    // Stopped before the commit: the old state stays.
+    prepareSave({ ...settings, bytes: word("lost"), files: [{ path: brief + ".md", text: "lost" }] });
+    assert.equal(await head(), 1);
+    assert.equal(readFileSync(brief, "utf8").slice(-5), "brief");
+    assert(!existsSync(brief + ".md"));
+    assert.deepEqual(readdirSync(join(folder, "docs")).filter(name => name.startsWith(".")), []);
+    // Stopped after the commit: the save is finished.
+    prepareSave({ ...settings, bytes: word("kept"), files: [{ path: brief + ".md", text: "kept" }] });
+    commitSave(settings);
+    assert.equal(await head(), 0);
+    assert.equal(readFileSync(brief + ".md", "utf8"), "kept");
+    assert.equal(readdirSync(join(folder, ".ternleaf/archive")).length, 1);
+    assert.deepEqual(readdirSync(join(folder, ".ternleaf")).filter(name => name.includes(".save")), []);
+  } finally { rmSync(folder, { recursive: true, force: true }); }
+});

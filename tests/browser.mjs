@@ -92,6 +92,18 @@ try {
   // A declined request shows the agent's reason. A discarded request closes,
   // and the agent can no longer answer it.
   page = await launch("owned", "answers");
+  // Empty states: quiet lines that say how to start.
+  const empty = page.locator("#ternleaf-panel");
+  assert.equal(await empty.locator("[data-part=passage-meta]").textContent(),
+    "Select a sentence in the document, or choose Whole document to review all of it.");
+  assert.equal(await empty.locator("[data-part=chips-selection] [data-quick=shorten]").getAttribute("title"), "Select text first.");
+  assert.match(await empty.locator("[data-part=history-empty]").textContent(), /^No changes yet\. Each edit and each accepted proposal becomes a revision here, with its request and its reason\.$/);
+  assert.equal(await empty.locator("[data-part=rules-hint]").isHidden(), true, "a canvas without a project has no house rules");
+  // The editor's own "Opening <name>…" goes when the document is shown.
+  assert.doesNotMatch(await page.locator("#status").textContent().catch(() => ""), /^Opening /);
+  await empty.locator("[data-scope=document]").click();
+  await empty.locator("[data-part=doc-start]").filter({ hasText: "Choose a review below, or write what Copilot must look for." }).waitFor();
+  await empty.locator("[data-scope=selection]").click();
   const select = async () => {
     await key(page, "Control+Home");
     await page.keyboard.press("Shift+End");
@@ -131,6 +143,11 @@ try {
   await panel.getByRole("button", { name: "Accept change" }).click();
   await page.getByText("Saved at revision 1").waitFor();
   assert(await hasText(page, "Alpha KEEP four"));
+  // The quick request is done. Its text does not stay in the box.
+  assert.equal(await page.getByRole("textbox", { name: "Instructions for selected text" }).inputValue(), "");
+  await panel.getByRole("tab", { name: /History/ }).click();
+  await panel.locator("[data-part=record-empty]").isHidden().then(hidden => assert(hidden, "an accepted Copilot change starts the record"));
+  await panel.getByRole("tab", { name: "Review" }).click();
 
   // A whole-document review returns a queue. Each opened suggestion goes
   // through the same review and acceptance as a selected passage.
@@ -140,8 +157,8 @@ try {
   const shared = host.readReview(requestId);
   assert.equal(shared.scope, "document");
   const number = shared.paragraphs.find(item => item.text === "Alpha KEEP four").paragraph;
-  assert.throws(() => host.submitSuggestions(requestId, [{ paragraph: number, find: "absent", replacement: "x" }]), /invalid-suggestions/);
-  assert.deepEqual(host.submitSuggestions(requestId, [
+  await assert.rejects(host.submitSuggestions(requestId, [{ paragraph: number, find: "absent", replacement: "x" }]), /invalid-suggestions/);
+  assert.deepEqual(await host.submitSuggestions(requestId, [
     { paragraph: number, find: "Alpha", replacement: "Beta", rationale: "First." },
     { paragraph: number, find: "four", replacement: "five", rationale: "Second." },
     { paragraph: 999, find: "Alpha", replacement: "Gamma" },
@@ -227,8 +244,19 @@ try {
     .locator("[data-part=name]").filter({ hasText: name }).waitFor({ timeout: 60_000 });
   page = await openProject();
   await shows(page, "First.docx");
+  // A project without house rules says how to start them, once, until the
+  // author hides the line.
+  const hint = page.locator("#ternleaf-panel [data-part=rules-hint]");
+  await hint.filter({ hasText: /^No house rules in this project\. Copy \S*examples\/ternleaf\.rules\.example\.md to ternleaf\.rules\.md, and Ternleaf checks the rules while you write\./ }).waitFor();
   await editEnd(page, "Z");
   assert.equal((await state(page)).head, 1);
+  // Edits without an accepted Copilot change: the record has nothing yet.
+  await page.locator("#ternleaf-panel").getByRole("tab", { name: /History/ }).click();
+  await page.locator("#ternleaf-panel [data-part=record-empty]").filter({ hasText: "The change record lists accepted Copilot changes. Accept a proposal to start it." }).waitFor();
+  await page.locator("#ternleaf-panel").getByRole("tab", { name: "Review" }).click();
+  await hint.getByRole("button", { name: "Hide" }).click();
+  assert(await hint.isHidden());
+  assert.equal(await page.evaluate(() => localStorage.getItem("ternleaf-hide-rules-hint-none")), "true");
   await page.keyboard.press("Control+s");
   await page.getByText("Saved at revision 1. Ternleaf saves every change.").waitFor();
   await page.keyboard.press("Control+o");
@@ -292,7 +320,7 @@ try {
   assert.deepEqual([measured.now.pages >= 1, measured.after.pages <= measured.now.pages, measured.now.words - measured.after.words, measured.applied,
     measured.cannotApply], [true, true, 2, 1, [{ suggestion: 2, reason: "the find text is not in that paragraph" }]]);
   assert.equal((await state(page)).head, 1);
-  const sent = act("ternleaf_suggest")(host, { instructions: "Use HOLD, not KEEP.", revision: text.revision, suggestions: [
+  const sent = await act("ternleaf_suggest")(host, { instructions: "Use HOLD, not KEEP.", revision: text.revision, suggestions: [
     { paragraph: line.paragraph, find: "Alpha", remark: "Say what Alpha is." },
     { paragraph: line.paragraph, find: "KEEP", replacement: "HOLD", rationale: "The author asked for HOLD." },
     { paragraph: line.paragraph, find: "absent", replacement: "x" }] });
@@ -309,7 +337,7 @@ try {
   await until(async () => (await state(page)).head === 2, "the accepted suggestion is revision 2");
   assert(await hasText(page, "Alpha HOLD omegaZ"));
   // The document changed, so the text that Copilot read is out of date.
-  assert.throws(() => act("ternleaf_suggest")(host, { instructions: "Again.", revision: 1,
+  await assert.rejects(act("ternleaf_suggest")(host, { instructions: "Again.", revision: 1,
     suggestions: [{ paragraph: line.paragraph, find: "HOLD", replacement: "KEEP" }] }), /stale-document/);
   await select();
   await until(() => host.status().canvas.selection?.text === "Alpha HOLD omegaZ", "the selection reaches the host");
@@ -341,6 +369,11 @@ try {
   // Stage 2 of the plan, in a document with bold text inside a paragraph:
   // checks without a model, a remark that becomes a Word comment, and a
   // change across a formatting boundary with its warning.
+  // Rules without a ternleaf block: Copilot follows them, and one line says
+  // how to add checks.
+  await writeFile(join(folder, "ternleaf.rules.md"), "Write plainly.\n");
+  await page.locator("#ternleaf-panel").getByRole("tab", { name: "Review" }).click();
+  await page.locator("#ternleaf-panel [data-part=rules-hint]").filter({ hasText: "Copilot follows ternleaf.rules.md. Add a ternleaf block, for example max-pages: 2, and Ternleaf checks it while you write." }).waitFor();
   await writeFile(join(folder, "ternleaf.rules.md"), "Write plainly.\n```ternleaf\nmax-words: 5\navoid: sentence => line\nmax-pages: 3\n```\n");
   await copyFile(new URL("./fixtures/mixed.docx", import.meta.url), join(folder, "docs", "Mixed.docx"));
   host.openDocument("docs/Mixed.docx");
@@ -362,7 +395,7 @@ try {
     await page.getByRole("button", { name: "Accept change" }).click();
     await until(async () => (await state(page)).head === head, "the accepted change is revision " + head);
   };
-  act("ternleaf_suggest")(host, { instructions: "Review against the house rules.", revision: mixed.revision, suggestions: [
+  await act("ternleaf_suggest")(host, { instructions: "Review against the house rules.", revision: mixed.revision, suggestions: [
     { paragraph: bold.paragraph, find: "bold middle", replacement: "strong centre", rationale: "A whole bold phrase." },
     { paragraph: second.paragraph, find: "stays here.", replacement: "stays.\nA new paragraph follows.", rationale: "A new paragraph." },
     { paragraph: third.paragraph, find: "Third paragraph", remark: "Say which paragraph." }] });
@@ -391,13 +424,18 @@ try {
   });
   await until(() => host.status().canvas.suggestingMode === true && host.status().document.revision === 4, "Suggesting mode reaches the host");
   let now = await act("ternleaf_read")(host, {});
-  act("ternleaf_suggest")(host, { instructions: "Call it a note.", revision: now.revision, suggestions: [
+  await act("ternleaf_suggest")(host, { instructions: "Call it a note.", revision: now.revision, suggestions: [
     { paragraph: now.paragraphs.find(item => item.text.startsWith("Third paragraph")).paragraph, find: "for a comment", replacement: "for a note", rationale: "Tracked." }] });
   await page.locator("#ternleaf-panel [data-part=queue-list]").getByRole("button", { name: "Review" }).click();
   await page.locator("#ternleaf-panel [data-part=tracked]").filter({ hasText: "tracked change" }).waitFor();
   await acceptNext(5);
   const trackedChanges = JSON.parse(await page.evaluate(() => window.ternleafEditor.doc.listRevisions()));
   assert.deepEqual(trackedChanges.map(item => [item.kind, item.text]).sort(), [["deletion", "comment"], ["insertion", "note"]]);
+  // A change with a new paragraph cannot be a tracked change in one revision.
+  const inSuggesting = await act("ternleaf_read")(host, {});
+  const trackedBreak = await act("ternleaf_measure")(host, { revision: inSuggesting.revision, suggestions: [
+    { paragraph: inSuggesting.paragraphs.find(item => item.text.startsWith("Second paragraph")).paragraph, find: "stays.", replacement: "stays.\nAnd more." }] });
+  assert.match(trackedBreak.cannotApply[0].reason, /^In Suggesting mode, Ternleaf cannot accept a change with a new paragraph, because the engine cannot record it as one tracked change\. Switch to Editing/);
   await page.evaluate(async () => {
     const { doc, refresh } = window.ternleafEditor;
     const [node] = JSON.parse(doc.searchableText())[0];
@@ -406,7 +444,7 @@ try {
   await until(() => host.status().canvas.suggestingMode === false && host.status().document.revision === 6, "Editing mode reaches the host");
   // A change across bold and plain text is applied, with a warning.
   now = await act("ternleaf_read")(host, {});
-  act("ternleaf_suggest")(host, { instructions: "Shorten.", revision: now.revision, suggestions: [
+  await act("ternleaf_suggest")(host, { instructions: "Shorten.", revision: now.revision, suggestions: [
     { paragraph: now.paragraphs.find(item => item.text.startsWith("Plain start")).paragraph, find: "start strong centre plain", replacement: "opening", rationale: "Shorter." }] });
   await page.locator("#ternleaf-panel [data-part=queue-list]").getByRole("button", { name: "Review" }).click();
   await page.locator("#ternleaf-panel [data-part=mixed]").filter({ hasText: "formatting of the first replaced word" }).waitFor();
@@ -416,7 +454,11 @@ try {
 
   // A copy comes back from Word. It was exported at revision 0, and the
   // document changed here after that. Only the changes from Word come to the
-  // review, and the change that was made here stays.
+  // review, and the change that was made here stays. In Word, the first
+  // paragraph has a change and a new paragraph after it (one suggestion),
+  // and the third paragraph is removed. The copy gets its paragraph IDs
+  // from the file, as a copy from Word does, so the new paragraph has the
+  // ID of the second paragraph of the base.
   await copyFile(new URL("./fixtures/mixed.docx", import.meta.url), join(folder, "docs", "Back.docx"));
   host.openDocument("docs/Back.docx");
   await shows(page, "Back.docx");
@@ -429,15 +471,19 @@ try {
     const copy = wasm.open(exported.bytes);
     exported.free();
     const paragraphs = JSON.parse(copy.searchableText());
-    copy.replaceSelection(paragraphs[1][0], 0, paragraphs[1][0], 6, "Middle").free();
+    const length = node => copy.paragraphLength(node);
+    const add = (node, text) => copy.pasteRichRuns(node, length(node), node, length(node),
+      JSON.stringify([{ text: "", paragraphBreak: true }, { text }])).free();
+    copy.replaceSelection(paragraphs[1][0], length(paragraphs[1][0]), paragraphs[2][0], length(paragraphs[2][0]), "").free();
+    add(paragraphs[0][0], "Added in Word.");
     copy.replaceSelection(paragraphs[0][0], 0, paragraphs[0][0], 6, "").free();
     const edited = copy.exportAs(format, "preserve_when_safe");
     const bytes = Array.from(edited.bytes);
     edited.free();
     copy.free();
-    // Meanwhile the author changes the third paragraph here.
-    const [third] = JSON.parse(doc.searchableText())[2];
-    await refresh(doc.replaceSelection(third, 0, third, 5, "Final"));
+    // Meanwhile the author changes the second paragraph here.
+    const [second] = JSON.parse(doc.searchableText())[1];
+    await refresh(doc.replaceSelection(second, 0, second, 6, "Middle"));
     return bytes;
   }));
   await writeFile(join(out, "Back-r0.docx"), fromWord);
@@ -452,23 +498,22 @@ try {
   await page.locator("#ternleaf-panel [data-part=queue-list]").getByRole("button", { name: "Review" }).first().click();
   await page.locator("#ternleaf-panel [data-part=asked][data-origin=word]").waitFor();
   await acceptNext(2);
+  await page.locator("#ternleaf-panel [data-part=removes]").filter({ hasText: "removes the whole paragraph" }).waitFor();
   await page.locator("#ternleaf-panel [data-part=rationale-text]").filter({ hasText: "Changed in Word." }).waitFor();
   await acceptNext(3);
-  for (const expected of ["start bold middle plain end of the sentence.", "Middle paragraph stays here.", "Final paragraph for a comment."]) {
-    assert(await hasText(page, expected), expected);
-  }
-  assert(!(await hasText(page, "Plain start")));
+  assert.deepEqual(await page.evaluate(() => JSON.parse(window.ternleafEditor.doc.searchableText()).map(([, value]) => value)),
+    ["start bold middle plain end of the sentence.", "Added in Word.", "Middle paragraph stays here."]);
   assert.equal(act("ternleaf_history")(host, {}).changes.at(-1).from, "word");
   // A proposal that deletes all the text of a paragraph removes the paragraph.
   const whole = await act("ternleaf_read")(host, {});
-  act("ternleaf_suggest")(host, { instructions: "Remove the middle paragraph.", revision: whole.revision, suggestions: [
-    { paragraph: whole.paragraphs.find(item => item.text === "Middle paragraph stays here.").paragraph,
-      find: "Middle paragraph stays here.", replacement: "", rationale: "Not needed." }] });
+  await act("ternleaf_suggest")(host, { instructions: "Remove the added paragraph.", revision: whole.revision, suggestions: [
+    { paragraph: whole.paragraphs.find(item => item.text === "Added in Word.").paragraph,
+      find: "Added in Word.", replacement: "", rationale: "Not needed." }] });
   await page.locator("#ternleaf-panel [data-part=queue-list]").getByRole("button", { name: "Review" }).click();
   await page.locator("#ternleaf-panel [data-part=removes]").filter({ hasText: "removes the whole paragraph" }).waitFor();
   await acceptNext(4);
   assert.deepEqual(await page.evaluate(() => JSON.parse(window.ternleafEditor.doc.searchableText()).map(([, value]) => value)),
-    ["start bold middle plain end of the sentence.", "Final paragraph for a comment."]);
+    ["start bold middle plain end of the sentence.", "Middle paragraph stays here."]);
   assert.equal((await readFile(join(folder, (await act("ternleaf_export")(host, { format: "docx" })).path))).subarray(0, 2).toString(), "PK");
   assert.equal((await readFile(join(folder, word.path))).subarray(0, 2).toString(), "PK");
 
@@ -503,16 +548,126 @@ try {
   await until(() => host.status().edition?.changedPassages === 1, "the changed passage reaches the host");
   const reference = await act("ternleaf_reference_changes")(host, {});
   assert.deepEqual([reference.reference, reference.checkedRevision, reference.referenceRevision, reference.changes],
-    ["docs/Paper.docx", 1, 2, [{ change: "changed", before: "Another paragraph stays here.", after: "Another paragraph stays for now." }]]);
+    ["docs/Paper.docx", 1, 2, [{ id: "c1", change: "changed", before: "Another paragraph stays here.", after: "Another paragraph stays for now." }]]);
   await page.getByText("Copilot read the changes of the reference document.").waitFor();
+  // Copilot's update names the change that it answers. When the author
+  // accepts it, the two paragraphs are linked.
+  const summary = await act("ternleaf_read")(host, {});
+  await act("ternleaf_suggest")(host, { instructions: "Update the edition.", revision: summary.revision, suggestions: [
+    { paragraph: summary.paragraphs.find(item => item.text === "Second paragraph stays here.").paragraph,
+      find: "stays here", replacement: "stays for now", rationale: "The reference says so now.", answers: "c1" }] });
+  await page.locator("#ternleaf-panel [data-part=queue-list]").getByRole("button", { name: "Review" }).click();
+  await acceptNext(1);
   await page.locator("#ternleaf-panel").getByRole("button", { name: "Mark as checked" }).click();
   await page.getByText("The reference did not change since you last checked this edition.").waitFor();
   await until(() => host.status().edition?.changedPassages === 0, "the checked edition reaches the host");
   assert.deepEqual(host.status().edition, { reference: "docs/Paper.docx", checked: 2, changedPassages: 0 });
+  // The linked paragraph of the reference changes again. The Review pane and
+  // Copilot see which paragraph of the edition it is linked to.
+  await editPaper("stays for now", "stays for good", 3);
+  await page.getByText("Linked to: Second paragraph stays for now.").waitFor();
+  const again = await act("ternleaf_reference_changes")(host, {});
+  assert.deepEqual(again.changes, [{ id: "c1", change: "changed", before: "Another paragraph stays for now.",
+    after: "Another paragraph stays for good.", linkedTo: { paragraph: 2, text: "Second paragraph stays for now." } }]);
+  await page.locator("#ternleaf-panel").getByRole("button", { name: "Mark as checked" }).click();
+  await page.getByText("The reference did not change since you last checked this edition.").waitFor();
+
+  // Save to the Word file: the .docx on disk gets the current text, with a
+  // text copy and a change log next to it, and a new history starts there.
+  await copyFile(new URL("./fixtures/mixed.docx", import.meta.url), join(folder, "docs", "Save.docx"));
+  host.openDocument("docs/Save.docx");
+  await shows(page, "Save.docx");
+  await until(() => host.status().canvas.ready, "the canvas shows Save.docx");
+  const unsaved = await act("ternleaf_read")(host, {});
+  await act("ternleaf_suggest")(host, { instructions: "Say kept.", revision: unsaved.revision, suggestions: [
+    { paragraph: unsaved.paragraphs.find(item => item.text === "Second paragraph stays here.").paragraph,
+      find: "stays here", replacement: "is kept", rationale: "Plainer." }] });
+  await page.locator("#ternleaf-panel [data-part=queue-list]").getByRole("button", { name: "Review" }).click();
+  await acceptNext(1);
+  await page.getByRole("heading", { name: "All suggestions reviewed" }).waitFor();
+  await page.locator("#ternleaf-panel").getByRole("button", { name: "Dismiss all" }).click();
+  await page.locator("#ternleaf-panel [role=status]").filter({ hasText: "Saved at revision 1 · not in the Word file" }).waitFor();
+  assert.equal(host.status().unsavedRevisions, 1);
+  // A Word export before the save names its history. A colleague changes the
+  // third paragraph of it in Word.
+  const beforeSave = await act("ternleaf_export")(host, { format: "docx" });
+  assert.match(beforeSave.path, /^exports\/Save-r1-[a-f0-9]{10}\.docx$/);
+  const oldCopy = await page.evaluate(async exported => {
+    const wasm = await import("/pkg/casual_doc_wasm.js");
+    const copy = wasm.open(new Uint8Array(exported));
+    const [third] = JSON.parse(copy.searchableText())[2];
+    copy.replaceSelection(third, 0, third, 5, "Last").free();
+    const edited = copy.exportAs("org.openxmlformats.wordprocessingml.document", "preserve_when_safe");
+    try { return Array.from(edited.bytes); } finally { edited.free(); copy.free(); }
+  }, Array.from(await readFile(join(folder, beforeSave.path))));
+  await writeFile(join(out, beforeSave.path.slice("exports/".length)), Buffer.from(oldCopy));
+  const original = await readFile(join(folder, "docs", "Save.docx"));
+  await page.locator("#ternleaf-panel [data-action=export-menu]").click();
+  await page.getByRole("menuitem", { name: "Save to the Word file…" }).click();
+  await page.locator("#ternleaf-confirm").getByText("Undo cannot go back to a revision before the save.").waitFor();
+  await page.locator("#ternleaf-confirm").getByRole("button", { name: "Save to the Word file" }).click();
+  const commitText = page.locator("#ternleaf-copy textarea");
+  await commitText.waitFor();
+  assert.equal(await commitText.inputValue(), 'Update docs/Save.docx: 1 accepted change\n\n- "stays here" → "is kept" (revision 1)');
+  await page.locator("#ternleaf-copy").getByRole("button", { name: "Copy the commit message" }).click();
+  await page.locator("#ternleaf-copy [data-part=copied]").filter({ hasText: /Copied|Ctrl\+C/ }).waitFor();
+  const onDisk = await readFile(join(folder, "docs", "Save.docx"));
+  assert.equal(onDisk.subarray(0, 2).toString(), "PK");
+  assert(!onDisk.equals(original));
+  const copied = await readFile(join(folder, "docs", "Save.docx.md"), "utf8");
+  assert.match(copied.split("\n")[0], /^<!-- Ternleaf writes this file from Save\.docx .* Do not edit this file/);
+  assert(copied.includes("Second paragraph is kept."), copied);
+  assert.match(await readFile(join(folder, "docs", "Save.docx.changes.md"), "utf8"),
+    /# Change log: Save\.docx[\s\S]*1 revision, 1 accepted change[\s\S]*Request \(from the chat\): Say kept\.[\s\S]*> stays here[\s\S]*> is kept/);
+  assert.equal((await readdir(join(folder, ".ternleaf", "archive"))).filter(file => /^\d.*-Save-[a-f0-9]{10}\.sqlite$/.test(file)).length, 1);
+  // The page reloads when the author closes the window. The new history
+  // starts at revision 0 from the saved file, which has the new text.
+  await page.locator("#ternleaf-copy").getByRole("button", { name: "Close" }).click();
+  await page.locator("#ternleaf-panel [role=status]").filter({ hasText: "Saved at revision 0 · same as the Word file" }).waitFor({ timeout: 60_000 });
+  await shows(page, "Save.docx");
+  assert.equal((await state(page)).head, 0);
+  assert(await hasText(page, "Second paragraph is kept."));
+  assert.equal(host.status().unsavedRevisions, 0);
+  // The copy from before the save comes back. Its base is in the archive, and
+  // its suggestion has the paragraph IDs of the new history.
+  await page.locator("#ternleaf-panel [data-action=export-menu]").click();
+  const [oldFile] = await Promise.all([page.waitForEvent("filechooser"),
+    page.getByRole("menuitem", { name: "Merge a copy from Word…" }).click()]);
+  await oldFile.setFiles(join(out, beforeSave.path.slice("exports/".length)));
+  await page.locator("#ternleaf-panel [data-part=queue-prompt][data-origin=word]")
+    .filter({ hasText: "made in Word after revision 1 of the history before the last save to the Word file." }).waitFor();
+  await page.locator("#ternleaf-panel [data-part=queue-list]").getByRole("button", { name: "Review" }).first().click();
+  await acceptNext(1);
+  assert(await hasText(page, "Last paragraph for a comment."));
+  assert(await hasText(page, "Second paragraph is kept."));
+
+  // An edition keeps the passages that the author did not check yet through
+  // a save of its reference to the Word file, and joins them with the
+  // changes after the save.
+  await editPaper("for a comment", "for a note", 4);
+  await page.getByText("The reference changed in 1 passage since you last checked this edition.").waitFor();
+  host.openDocument("docs/Paper.docx");
+  await shows(page, "Paper.docx");
+  await until(() => host.status().canvas.ready, "the canvas shows Paper.docx");
+  await page.locator("#ternleaf-panel [data-action=export-menu]").click();
+  await page.getByRole("menuitem", { name: "Save to the Word file…" }).click();
+  await page.locator("#ternleaf-confirm").getByRole("button", { name: "Save to the Word file" }).click();
+  await page.locator("#ternleaf-copy textarea").waitFor();
+  await page.locator("#ternleaf-copy").getByRole("button", { name: "Close" }).click();
+  await page.locator("#ternleaf-panel [role=status]").filter({ hasText: "Saved at revision 0 · same as the Word file" }).waitFor({ timeout: 60_000 });
+  await editPaper("for a note", "for a remark", 1);
+  // The link follows the paragraph into the new history of the reference.
+  await editPaper("stays for good", "stays always", 2);
+  await page.getByText("The reference changed in 2 passages since you last checked this edition.").waitFor();
+  const carried = await act("ternleaf_reference_changes")(host, {});
+  assert.deepEqual([carried.checkedRevision, carried.referenceRevision, carried.changes], [0, 2, [
+    { id: "c1", change: "changed", before: "Third paragraph for a comment.", after: "Third paragraph for a remark." },
+    { id: "c2", change: "changed", before: "Another paragraph stays for good.", after: "Another paragraph stays always.",
+      linkedTo: { paragraph: 2, text: "Second paragraph stays for now." } }]]);
   await close(page);
 
   console.log(JSON.stringify({ synchronousAdmissionMs: admission }));
-  console.log("Browser selection review, saved draft, stale action rejection after reload, lost-response recovery, decline, discard, alternatives, author edit, document review, export, undo, retry, redo, project documents and Copilot's work from the chat passed.");
+  console.log("Browser selection review, saved draft, stale action rejection after reload, lost-response recovery, decline, discard, alternatives, author edit, document review, export, undo, retry, redo, project documents, Copilot's work from the chat, Word merges with new and removed paragraphs and across a save, edition links and the save to the Word file passed.");
 } finally {
   await browser.close();
   await host?.close();
