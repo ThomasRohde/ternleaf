@@ -51,7 +51,10 @@ export const actions = [
     run: async (host, input) => {
       if (input?.requestId) {
         const shared = host.readReview(input.requestId);
-        return { ...shared, houseRules: host.houseRules(), reply: shared.scope === "document" ? rules.document : rules.passage };
+        const { edition } = host.status();
+        return { ...shared, houseRules: host.houseRules(),
+          ...(edition ? { edition: { ...edition, note: "This document is an edition of the reference. If the instructions ask for an update, call ternleaf_reference_changes for the changed passages of the reference." } } : {}),
+          reply: shared.scope === "document" ? rules.document : rules.passage };
       }
       const text = await host.read({ from: input?.from });
       return { ...text, reply: rules.chat(text.revision) };
@@ -156,6 +159,17 @@ export const actions = [
       return { ...result, next: result.cannotApply.length
         ? "Some changes cannot be applied. Leave them out or change them before you call ternleaf_suggest."
         : "To propose these changes to the author, call ternleaf_suggest with the same suggestions." };
+    },
+  },
+  {
+    name: "ternleaf_reference_changes",
+    description: "For a document that is an edition of another document: the passages of the reference document that changed since the author last checked this edition, with the text before and after. Use it to bring the edition up to date. ternleaf_status says whether the open document is an edition.",
+    inputSchema: none,
+    run: async host => {
+      const result = await host.referenceChanges();
+      return { ...result, next: result.changes.length
+        ? "Read this edition with ternleaf_read. For each change, find the passage of the edition that says the same thing, and propose its update with ternleaf_suggest. That two passages say the same thing is your judgement: name the changed passage of the reference in the rationale, so that the author can check it. Where the edition must change and you cannot write the text, send a remark. Leave out a change that the edition does not cover."
+        : "The reference did not change since the author last checked this edition. Tell the author." };
     },
   },
   {

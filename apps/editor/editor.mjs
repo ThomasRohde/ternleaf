@@ -2,6 +2,7 @@ import { open as openDoc } from "/pkg/casual_doc_wasm.js";
 import { authorDecides, validateDocxExport } from "./export-policy.mjs";
 import { reviewChange } from "./review-change.mjs";
 import { runChecks } from "./checks.mjs";
+import { passageChanges, updateInstruction } from "./edition.mjs";
 import { forAuthor } from "./messages.mjs";
 import { captureWordEvidence } from "./word-evidence.mjs";
 import { wordCount, wordDiff } from "./diff.mjs";
@@ -280,6 +281,7 @@ export function attachTernleaf(editor) {
     globalThis.ternleafProjectAttached = true;
     paintPill();
     void call("opened", { lease }).catch(() => {});
+    void loadEdition().catch(() => {});
     note.value = state.editorial?.note ?? "";
     updateDiagnostics();
     ready();
@@ -388,6 +390,74 @@ export function attachTernleaf(editor) {
     } finally { output.free(); }
   }
 
+  // ---- Editions ----------------------------------------------------------
+  // This document can be an edition of another document of the project.
+  // The editor gets the reference's source and its saved edits, builds the
+  // revision that the author last checked and the newest one, and compares
+  // their paragraphs. Only text is read. The reference is not changed.
+  let edition = null;            // { reference, checked }
+  let referenceHead = 0;
+  let referenceChanges = null;   // null until the comparison has run.
+  async function loadEdition() {
+    const state = await call("edition-reference", { lease });
+    edition = state.edition;
+    referenceChanges = null;
+    if (edition) {
+      const sample = openDoc(Uint8Array.from(atob(state.source), char => char.charCodeAt(0)));
+      try {
+        const read = () => JSON.parse(sample.searchableText());
+        const replay = frames => { for (const frame of frames) sample.replayDurableFrame(JSON.stringify(frame)); };
+        const checked = Math.min(edition.checked, state.frames.length);
+        replay(state.frames.slice(0, checked));
+        const before = read();
+        replay(state.frames.slice(checked));
+        referenceHead = state.frames.length;
+        referenceChanges = passageChanges(before, read());
+      } finally { sample.free(); }
+    }
+    renderEdition();
+    return edition;
+  }
+  function renderEdition() {
+    const section = part("edition");
+    section.hidden = !edition;
+    if (!edition) return;
+    const changed = referenceChanges?.length ?? 0;
+    section.dataset.state = changed ? "changed" : "current";
+    part("edition-title").textContent = `Edition of ${edition.reference}`;
+    part("edition-state").textContent = referenceChanges === null ? "Comparing with the reference…"
+      : changed ? `The reference changed in ${changed} ${changed === 1 ? "passage" : "passages"} since you last checked this edition.`
+      : "The reference did not change since you last checked this edition.";
+    part("edition-list").replaceChildren(...(referenceChanges ?? []).slice(0, 4).map(item => {
+      const row = document.createElement("li");
+      const slip = document.createElement("p");
+      slip.className = "tl-slip tl-slip-small";
+      if (item.change === "changed") slip.append(...diffNodes(item.before, item.after));
+      else slip.append(Object.assign(document.createElement(item.change === "added" ? "ins" : "del"), { textContent: item.after ?? item.before }));
+      row.append(slip);
+      return row;
+    }));
+    part("edition-more").hidden = changed <= 4;
+    part("edition-more").textContent = changed > 4 ? `And ${changed - 4} more.` : "";
+    for (const action of ["edition-ask", "edition-checked"]) button(action).hidden = !changed;
+  }
+  async function chooseReference() {
+    const { selectDialog } = await import("./documents.mjs");
+    const state = await call("edition", { lease });
+    const choice = await selectDialog({
+      title: "Make this document an edition",
+      paragraphs: ["An edition says what another document says, for another reader: a short brief of a long paper, for example.",
+        "Choose the reference document. When the reference changes, Ternleaf shows you the changed passages here, so that you can bring this edition up to date."],
+      label: "Reference document",
+      options: [{ value: "", label: "No reference" }, ...state.candidates.map(path => ({ value: path, label: path }))],
+      value: state.edition?.reference ?? "", yes: "Save" });
+    if (choice === undefined) return;
+    await call("edition-set", { lease, reference: choice || null });
+    await loadEdition();
+    setOpen(true);
+    showView("review");
+  }
+
   // Merge a copy that comes back from Word. The name of a Ternleaf export
   // carries its revision: that revision is the base. The engine compares
   // the base with the copy, so the result is what changed in Word, and not
@@ -459,6 +529,11 @@ export function attachTernleaf(editor) {
         : job.kind === "page" ? pageForCopilot(job.page)
         : job.kind === "export" ? exportForCopilot(job.format)
         : job.kind === "measure" ? measureForCopilot(job.changes)
+        : job.kind === "reference" ? await (async () => {
+          if (!await loadEdition()) throw refusal("no-reference");
+          tell("Copilot read the changes of the reference document.");
+          return { reference: edition.reference, checked: edition.checked, head: referenceHead, changes: referenceChanges };
+        })()
         : (() => { throw refusal("invalid-request"); })();
       answer = { result };
     } catch (error) {
@@ -474,7 +549,8 @@ export function attachTernleaf(editor) {
       const selection = live ?? (stillThere(captured) ? captured : null);
       const state = await call("pulse", { lease, live: { revision: journal.length, pages: editor.doc.pageCount,
         words: wordTotal(), suggesting: Boolean(editor.doc.trackRevisions), selection,
-        failing: houseChecks().filter(result => !result.ok).map(result => result.text) } });
+        failing: houseChecks().filter(result => !result.ok).map(result => result.text),
+        referenceChanges: edition && referenceChanges ? referenceChanges.length : null } });
       if (checked.revision !== shownChecks) { shownChecks = checked.revision; renderChecks(); }
       const changed = chatStamp !== undefined && state.stamp !== chatStamp;
       chatStamp = state.stamp;
@@ -1462,6 +1538,14 @@ export function attachTernleaf(editor) {
           if (preview) { preview.whole = !preview.whole; paintPreview(); }
           break;
         case "export": await download(); break;
+        case "edition": closeExportMenu(); await chooseReference(); break;
+        case "edition-refresh": await loadEdition(); break;
+        case "edition-checked":
+          await call("edition-checked", { lease, revision: referenceHead });
+          await loadEdition();
+          toast("This edition is checked against the reference as it is now.");
+          break;
+        case "edition-ask": await requestDocument(updateInstruction(edition.reference)); break;
         case "merge": {
           closeExportMenu();
           const picker = Object.assign(document.createElement("input"), { type: "file", accept: ".docx" });

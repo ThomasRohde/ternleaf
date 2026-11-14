@@ -64,6 +64,18 @@ export function layout() {
     <div class="tl-body">
       <section role="tabpanel" id="tl-view-review" data-view="review" aria-labelledby="tl-tab-review">
         <div data-part="compose" class="tl-stack">
+          <section class="tl-checks tl-edition" data-part="edition" hidden>
+            <h3 data-part="edition-title"></h3>
+            <p class="tl-help" data-part="edition-state"></p>
+            <ul class="tl-edition-list" data-part="edition-list"></ul>
+            <p class="tl-help" data-part="edition-more" hidden></p>
+            <div class="tl-actions">
+              <button type="button" class="tl-button" data-action="edition-ask" hidden>Ask Copilot to update</button>
+              <button type="button" class="tl-link" data-action="edition-checked" hidden
+                title="Says that this edition is right for the reference as it is now. The changed passages leave this list.">Mark as checked</button>
+              <button type="button" class="tl-link" data-action="edition-refresh">Check again</button>
+            </div>
+          </section>
           <section class="tl-checks" data-part="checks" hidden>
             <h3 data-part="checks-title"></h3>
             <ul data-part="checks-list"></ul>
@@ -179,7 +191,9 @@ export function layout() {
           <button type="button" role="menuitem" data-action="export-as" data-command="file.export.markdown">Markdown</button>
           <button type="button" role="menuitem" data-action="export-as" data-command="file.export.html">Web page</button>
           <button type="button" role="menuitem" data-action="export-as" data-command="file.export.text">Plain text</button>
-          <button type="button" role="menuitem" data-action="merge" class="tl-menu-rule"
+          <button type="button" role="menuitem" data-action="edition" class="tl-menu-rule"
+            title="Link this document to a reference document. Ternleaf then shows you when the reference changes.">Make this an edition of…</button>
+          <button type="button" role="menuitem" data-action="merge"
             title="Choose a Word file that was exported here and edited in Word. Its changes come to the review.">Merge a copy from Word…</button>
         </div>
       </div>

@@ -27,6 +27,7 @@ Copilot calls an action with `invoke_canvas_action` on an open canvas instance.
 | `ternleaf_decline` | Answers a request from the canvas without a change, with a reason. |
 | `ternleaf_view_page` | Returns a picture of one page, for questions about layout, tables, charts and pictures. |
 | `ternleaf_export` | Writes the current revision as `docx`, `pdf`, `markdown`, `html` or `text` into the `exports` folder of the project and returns the path. The format `changes` writes the change record. |
+| `ternleaf_reference_changes` | For an edition: the passages of its reference document that changed since the author last checked, with the text before and after. |
 | `ternleaf_documents` | Lists the Word documents of the project folder. |
 | `ternleaf_open_document` | Shows another document of the project in the canvas. |
 | `ternleaf_history` | Returns the accepted changes: the request, the text before and after, and the author's note. |
@@ -54,6 +55,14 @@ The definitions are in [`apps/agent/actions.mjs`](../apps/agent/actions.mjs). Ea
 **Checks.** A block with the name `ternleaf` in the rules file holds rules with a fixed form. The editor checks them after every change ([`checks.mjs`](../apps/editor/checks.mjs)), shows the failing ones to the author and reports them with the pulse. `ternleaf_status` and `ternleaf_read` return them in `failingChecks`.
 
 **Length.** `ternleaf_measure` sends the changes to the editor as a job. The editor opens a copy of the source, replays the journal, applies each change with the same checks as a real proposal, and returns the page and word counts. A change that cannot be applied comes back with the reason, so Copilot can correct its list before the author sees it.
+
+## Editions
+
+A document can be an edition of another document of the project, its reference. The author makes the link in the menu next to **Export DOCX**. The record is in `.ternleaf/editions.json`: the reference, and the revision of the reference that the author last checked the edition against.
+
+The editor gets the reference's source and saved edits from the host, builds the checked revision and the newest one in a copy, and compares their paragraphs ([`edition.mjs`](../apps/editor/edition.mjs)). The engine keeps the ID of a paragraph through its edits, so a paragraph with the same ID and another text is a changed passage. The Review pane lists the changed passages. `ternleaf_status` gives Copilot the count, and `ternleaf_reference_changes` gives it the text.
+
+Which passage of the edition says the same thing as a changed passage of the reference is Copilot's judgement. It names the passage in its reason, and the author checks it. Only the author can mark the edition as checked.
 
 ## What keeps Copilot on the canvas
 

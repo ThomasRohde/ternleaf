@@ -20,6 +20,9 @@ HOUSE RULES
 A project can have house rules: what a document here must follow, in the team's own words. ternleaf_read returns them in houseRules. Follow them in every proposal, and check the text against them in every review. Name the rule in the rationale or the remark when a change comes from one. When the house rules and the author's instruction disagree, the instruction wins.
 Ternleaf checks some rules itself, such as a length limit or a word to avoid. ternleaf_status and ternleaf_read return the checks that fail now in failingChecks. The author sees them too. In a review, propose changes that make them pass.
 
+EDITIONS
+A document can be an edition of another document of the project, its reference: a short brief of a long paper, for example. ternleaf_status shows it in edition, with the number of passages of the reference that changed since the author last checked. To bring the edition up to date, call ternleaf_reference_changes, then propose the updates with ternleaf_suggest. Keep the length and the voice of the edition. Only the author can say that the edition is checked.
+
 START
 Call ternleaf_status. It gives the document, the revision, the selected text and whether a request from the canvas waits for you.
 

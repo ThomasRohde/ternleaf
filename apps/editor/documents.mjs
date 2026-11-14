@@ -51,6 +51,35 @@ export function confirmDialog({ title, paragraphs, yes, no = "Cancel" }) {
   });
 }
 
+// A window with one choice from a list. Resolves to the chosen value, or to
+// undefined when the author cancels.
+export function selectDialog({ title, paragraphs, label, options, value, yes, no = "Cancel" }) {
+  const element = dialog("ternleaf-select", title, `
+    <header><h2>${escape(title)}</h2></header>
+    <div class="tl-confirm">${paragraphs.map(text => `<p>${escape(text)}</p>`).join("")}
+      <label class="tl-field"><span>${escape(label)}</span>
+        <select data-part="choice">${options.map(option =>
+          `<option value="${escape(option.value)}"${option.value === value ? " selected" : ""}>${escape(option.label)}</option>`).join("")}</select>
+      </label>
+    </div>
+    <footer>
+      <button type="button" class="tl-button tl-primary" data-do="yes">${escape(yes)}</button>
+      <button type="button" class="tl-button" data-do="no">${escape(no)}</button>
+    </footer>`);
+  return new Promise(resolve => {
+    let answer;
+    element.addEventListener("click", event => {
+      const choice = event.target.closest("[data-do]")?.dataset.do;
+      if (!choice) return;
+      if (choice === "yes") answer = element.querySelector('[data-part="choice"]').value;
+      element.close();
+    });
+    element.addEventListener("close", () => { element.remove(); resolve(answer); });
+    element.showModal();
+    element.querySelector('[data-part="choice"]').focus();
+  });
+}
+
 export function createDocuments({ api, upload, toast, reload }) {
   let listing = { documents: [], folders: [""], current: null };
   let busy = false;

@@ -67,6 +67,10 @@ Export a Word file, let a colleague edit it in Word, and choose **Merge a copy f
 
 If your reviewer works with tracked changes, switch the editor to Suggesting. Each proposal that you accept then goes into the document as a Word tracked change.
 
+### One source, several readers
+
+A two-page brief of a long paper says what the paper says, for another reader. Choose **Make this an edition of…** and name the paper as the reference. When the paper changes, the brief shows you the passages that changed, and **Ask Copilot to update** brings proposals for the brief to the same review. You decide when the brief is checked.
+
 ### Open, create and add documents
 
 Press Ctrl+O, or choose **File → Open**, to see the Word documents in the project folder. Start a new document from a blank page, a letter, a report or meeting notes, or add a copy of a file from your computer. Each document keeps its own history, and a new canvas returns to the document that you had open last.
@@ -114,6 +118,7 @@ GitHub Copilot app
 | `ternleaf_view_page` | Look at a page as a picture: layout, tables, charts. |
 | `ternleaf_measure` | Get the real pages and words of the document with a list of changes, before it suggests them. |
 | `ternleaf_export` | Write the current revision as a Word file, PDF, Markdown, web page or text into `exports/`. |
+| `ternleaf_reference_changes` | For an edition: read what changed in its reference document. |
 | `ternleaf_documents`, `ternleaf_open_document` | List the Word documents of the project and show one. |
 | `ternleaf_history` | Read the changes that you accepted. |
 

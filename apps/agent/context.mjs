@@ -9,6 +9,7 @@ const count = (number, word) => `${number} ${word}${number === 1 ? "" : "s"}`;
 function decision(event) {
   if (event.decision === "accepted") return `accepted "${clip(event.before, 80)}" → "${clip(event.replacement, 80)}" (revision ${event.revision})`;
   if (event.decision === "discarded") return `discarded the proposal for "${clip(event.before, 80)}"`;
+  if (event.decision === "checked") return `marked this edition as checked against revision ${event.revision} of ${event.reference}`;
   if (event.decision === "dismissed") return `dismissed ${count(event.suggestions, "open suggestion")}`;
   return null;
 }
@@ -39,6 +40,7 @@ export function promptContext(instances, state) {
     else line.push("The author has no text selected.");
     if (request) line.push(`A request from the canvas waits for your answer: call ternleaf_read with requestId ${request.requestId}.`);
     if (review) line.push("The author has a review open in the canvas.");
+    if (status.edition?.changedPassages) line.push(`This document is an edition of ${JSON.stringify(status.edition.reference)}, and ${count(status.edition.changedPassages, "passage")} of the reference changed since the author last checked.`);
     if (status.failingChecks?.length) line.push(`${count(status.failingChecks.length, "house rule check")} fail: ternleaf_status lists them.`);
     const decided = host.news().map(decision).filter(Boolean);
     if (decided.length) line.push(`Since your last turn the author ${decided.join("; ")}.`);

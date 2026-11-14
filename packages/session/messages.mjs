@@ -53,6 +53,7 @@ const agent = {
   "export-refused": "Ternleaf cannot write this document as a Word file without losing content. Use the pdf, markdown, html or text format.",
   "chat-access-off": "In this project, Copilot works only on what the author sends from the canvas. You cannot read the document or send proposals for a request from the chat. Tell the author to select the text, or to choose Whole document, in the Review pane and send the request there.",
   "single-document": "This canvas shows one document and has no project folder.",
+  "no-reference": "This document is not an edition of another document. Only the author can make it one, in the Review pane menu next to Export DOCX.",
   "invalid-request": "The input is not valid. Read the input schema of the action with list_canvas_capabilities.",
 };
 

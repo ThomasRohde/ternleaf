@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -217,6 +218,51 @@ export function createWorkspace({ project, workingDirectory }) {
     throw new ProjectError("Too many documents have that name. Choose another name.");
   }
 
+  // Editions: a document can be an edition of another document of the
+  // project, its reference. The record holds the reference and the revision
+  // of the reference that the author last checked this edition against.
+  const editionsFile = join(home, ".ternleaf", "editions.json");
+  function editions() {
+    try {
+      const value = JSON.parse(readFileSync(editionsFile, "utf8"));
+      return value && typeof value === "object" ? value : {};
+    } catch { return {}; }
+  }
+  function edition(source) {
+    const record = editions()[key(source)];
+    if (!record || typeof record.reference !== "string" || !Number.isSafeInteger(record.checked)) return null;
+    try { return { reference: key(locate(record.reference)), checked: record.checked }; }
+    catch { return null; }
+  }
+  // Set, change or (with no reference) remove the record of one document.
+  function setEdition(source, reference, checked = 0) {
+    const all = editions();
+    if (reference === null) delete all[key(source)];
+    else {
+      const target = locate(reference);
+      if (target === source) throw new ProjectError("A document cannot be an edition of itself.");
+      if (editions()[key(target)]) throw new ProjectError("That document is an edition itself. Choose its reference.");
+      all[key(source)] = { reference: key(target), checked };
+    }
+    try {
+      mkdirSync(dirname(editionsFile), { recursive: true });
+      writeFileSync(editionsFile, JSON.stringify(all, null, 2) + "\n");
+    } catch (error) { throw new ProjectError("The edition could not be saved: " + error.code); }
+    return edition(source);
+  }
+  // The reference as the editor needs it to compare two of its revisions:
+  // the source file and the saved edits, read without a change to them.
+  function referenceState(reference) {
+    const target = resolveDocument(reference);
+    if (!existsSync(target.state)) return { source: readFileSync(target.source), frames: [] };
+    const db = new DatabaseSync(target.state, { readOnly: true });
+    try {
+      const project = db.prepare("SELECT source FROM project").get();
+      const frames = db.prepare("SELECT record FROM commits ORDER BY revision").all().map(row => JSON.parse(row.record).frame);
+      return { source: project ? Buffer.from(project.source) : readFileSync(target.source), frames: project ? frames : [] };
+    } finally { db.close(); }
+  }
+
   // The house rules of the project: what a document here must follow, in
   // the team's own words. Copilot gets them with every read. The file is
   // ternleaf.rules.md in the project folder, or the "rules" path of
@@ -258,7 +304,7 @@ export function createWorkspace({ project, workingDirectory }) {
   // every canvas of the project, so the editor keeps one origin.
   const port = 42000 + (Number.parseInt(createHash("sha256").update(home).digest("hex").slice(0, 8), 16) % 16000);
 
-  return { resolve: resolveDocument, documents, remember, create, exportFile, rules, key, project: home, welcome, port };
+  return { resolve: resolveDocument, documents, remember, create, exportFile, rules, edition, setEdition, referenceState, key, project: home, welcome, port };
 }
 
 // The settings for one canvas. See createWorkspace.

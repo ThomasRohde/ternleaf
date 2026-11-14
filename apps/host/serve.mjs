@@ -293,6 +293,9 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
               suggesting: told.suggesting === true,
               // The house rule checks that fail now, as the editor found them.
               failing: (Array.isArray(told.failing) ? told.failing : []).slice(0, 12).map(line => String(line).slice(0, 300)),
+              // How many passages of the reference changed since the author
+              // last checked this edition. Null when the editor has not looked.
+              referenceChanges: Number.isSafeInteger(told.referenceChanges) ? told.referenceChanges : null,
               selection: picked && /^[a-f0-9]{32}$/.test(picked.node) && Number.isSafeInteger(picked.start)
                 && Number.isSafeInteger(picked.end) && typeof picked.before === "string" && picked.before.length <= 4000
                 && Number.isSafeInteger(picked.revision)
@@ -356,6 +359,36 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
           case "/api/adopt":
             store.adoptSuggestion(data.lease, session, fontHash, data.id, data.scope);
             return json(res, 200, reviews(data.lease));
+          case "/api/edition": {
+            // Is this document an edition of another one, and which
+            // documents could be its reference?
+            store.checkLease(data.lease);
+            const mine = workspace?.key(current);
+            return json(res, 200, { edition: workspace?.edition(current) ?? null,
+              candidates: (workspace?.documents().documents ?? []).map(item => item.path).filter(path => path !== mine).slice(0, 200) });
+          }
+          case "/api/edition-set": {
+            store.checkLease(data.lease);
+            if (!workspace) throw new Rejected("single-document");
+            if (data.reference === null) return json(res, 200, { edition: workspace.setEdition(current, null) });
+            // A new edition starts as checked against the reference as it is now.
+            const head = workspace.referenceState(data.reference).frames.length;
+            return json(res, 200, { edition: workspace.setEdition(current, data.reference, head) });
+          }
+          case "/api/edition-checked": {
+            store.checkLease(data.lease);
+            const record = workspace?.edition(current);
+            if (!record || !Number.isSafeInteger(data.revision) || data.revision < 0) throw new Rejected("invalid-request");
+            note({ decision: "checked", reference: record.reference, revision: data.revision });
+            return json(res, 200, { edition: workspace.setEdition(current, record.reference, data.revision) });
+          }
+          case "/api/edition-reference": {
+            store.checkLease(data.lease);
+            const record = workspace?.edition(current);
+            if (!record) return json(res, 200, { edition: null });
+            const { source: bytes, frames } = workspace.referenceState(record.reference);
+            return json(res, 200, { edition: record, source: Buffer.from(bytes).toString("base64"), frames });
+          }
           case "/api/merge": {
             // Changes that the author made in Word, found by the editor in a
             // copy that came back. They go to the same review as Copilot's
@@ -519,6 +552,7 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
           : { ready: false },
         request, review, chatAccess: chat, houseRules: workspace?.rules()?.path ?? null,
         ...(ready && live.failing.length ? { failingChecks: live.failing } : {}),
+        ...(edition => edition ? { edition: { ...edition, ...(ready && live.referenceChanges !== null ? { changedPassages: live.referenceChanges } : {}) } } : {})(workspace?.edition(current) ?? null),
       };
     },
     documents() {
@@ -555,6 +589,16 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
         ...(live?.failing.length ? { failingChecks: live.failing } : {}) };
     },
     houseRules() { return readable(workspace?.rules()); },
+    // What changed in the reference document since the author last checked
+    // this edition against it. The editor compares the two revisions.
+    async referenceChanges() {
+      if (!workspace?.edition(current)) throw new Rejected("no-reference");
+      const result = await editorJob("reference", {}, 40_000);
+      return { reference: String(result.reference), checkedRevision: Number(result.checked), referenceRevision: Number(result.head),
+        changes: (Array.isArray(result.changes) ? result.changes : []).slice(0, 80).map(({ change, before, after }) => ({
+          change: String(change), ...(typeof before === "string" ? { before: before.slice(0, 4000) } : {}),
+          ...(typeof after === "string" ? { after: after.slice(0, 4000) } : {}) })) };
+    },
     // What the document would be if the author accepted these changes: the
     // engine lays out a copy and counts the pages. Nothing is saved, and the
     // author sees nothing.

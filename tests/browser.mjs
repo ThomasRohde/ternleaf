@@ -460,6 +460,44 @@ try {
   assert(!(await hasText(page, "Plain start")));
   assert.equal(act("ternleaf_history")(host, {}).changes.at(-1).from, "word");
   assert.equal((await readFile(join(folder, word.path))).subarray(0, 2).toString(), "PK");
+
+  // Editions: a brief is an edition of a paper. The paper changes, and the
+  // brief shows the changed passage and gives it to Copilot.
+  await copyFile(new URL("./fixtures/mixed.docx", import.meta.url), join(folder, "docs", "Paper.docx"));
+  await copyFile(new URL("./fixtures/mixed.docx", import.meta.url), join(folder, "docs", "Summary.docx"));
+  const editPaper = async (from, to, head) => {
+    host.openDocument("docs/Paper.docx");
+    await shows(page, "Paper.docx");
+    await until(() => host.status().canvas.ready, "the canvas shows Paper.docx");
+    await page.evaluate(async ([find, text]) => {
+      const { doc, refresh } = window.ternleafEditor;
+      const [node, value] = JSON.parse(doc.searchableText()).find(([, paragraph]) => paragraph.includes(find));
+      const start = new TextEncoder().encode(value.slice(0, value.indexOf(find))).length;
+      await refresh(doc.replaceSelection(node, start, node, start + new TextEncoder().encode(find).length, text));
+    }, [from, to]);
+    await until(async () => (await state(page)).head === head, "the paper is at revision " + head);
+    host.openDocument("docs/Summary.docx");
+    await shows(page, "Summary.docx");
+    await until(() => host.status().canvas.ready, "the canvas shows Summary.docx");
+  };
+  await editPaper("Second", "Another", 1);
+  await page.locator("#ternleaf-panel [data-action=export-menu]").click();
+  await page.getByRole("menuitem", { name: "Make this an edition of…" }).click();
+  await page.locator("#ternleaf-select select").selectOption("docs/Paper.docx");
+  await page.locator("#ternleaf-select").getByRole("button", { name: "Save" }).click();
+  await page.getByText("Edition of docs/Paper.docx").waitFor();
+  await page.getByText("The reference did not change since you last checked this edition.").waitFor();
+  await editPaper("stays here", "stays for now", 2);
+  await page.getByText("The reference changed in 1 passage since you last checked this edition.").waitFor();
+  await until(() => host.status().edition?.changedPassages === 1, "the changed passage reaches the host");
+  const reference = await act("ternleaf_reference_changes")(host, {});
+  assert.deepEqual([reference.reference, reference.checkedRevision, reference.referenceRevision, reference.changes],
+    ["docs/Paper.docx", 1, 2, [{ change: "changed", before: "Another paragraph stays here.", after: "Another paragraph stays for now." }]]);
+  await page.getByText("Copilot read the changes of the reference document.").waitFor();
+  await page.locator("#ternleaf-panel").getByRole("button", { name: "Mark as checked" }).click();
+  await page.getByText("The reference did not change since you last checked this edition.").waitFor();
+  await until(() => host.status().edition?.changedPassages === 0, "the checked edition reaches the host");
+  assert.deepEqual(host.status().edition, { reference: "docs/Paper.docx", checked: 2, changedPassages: 0 });
   await close(page);
 
   console.log(JSON.stringify({ synchronousAdmissionMs: admission }));

@@ -8,6 +8,7 @@ import { promptContext, toolAdvice } from "../apps/agent/context.mjs";
 import { brief, canvasPrompt, guide, rules, skill } from "../apps/agent/guide.mjs";
 import { createWorkspace } from "../apps/host/project.mjs";
 import { runChecks } from "../apps/editor/checks.mjs";
+import { passageChanges } from "../apps/editor/edition.mjs";
 import { startHost } from "../apps/host/serve.mjs";
 import { refusalForAgent } from "../packages/session/messages.mjs";
 import { changeRecord } from "../packages/session/record.mjs";
@@ -269,6 +270,30 @@ test("Copilot works on the document from the chat, and the author stays in contr
     assert.equal((await post("history", { lease })).rules.checks.length, 4);
     host.news();
 
+    // An edition knows its reference and the revision that it was checked
+    // against. Copilot gets the changed passages from the editor.
+    assert.deepEqual((await post("edition", { lease })).edition, null);
+    await refused(() => action("ternleaf_reference_changes")(host, {}), "no-reference");
+    assert.equal((await post("edition-set", { lease, reference: "docs/Brief.docx" })).error, "project");
+    assert.deepEqual((await post("edition-set", { lease, reference: "examples/welcome-to-ternleaf.docx" })).edition,
+      { reference: "examples/welcome-to-ternleaf.docx", checked: 0 });
+    const reference = await post("edition-reference", { lease });
+    assert.deepEqual([Buffer.from(reference.source, "base64").subarray(4).toString(), reference.frames], ["welcome", []]);
+    await post("pulse", { lease, live: { revision: 0, selection, referenceChanges: 2 } });
+    assert.deepEqual(action("ternleaf_status")(host, {}).edition, { reference: "examples/welcome-to-ternleaf.docx", checked: 0, changedPassages: 2 });
+    assert.match(promptContext(new Map([["main", host]]), { briefed: true }), /edition of "examples\/welcome-to-ternleaf.docx", and 2 passages of the reference changed/);
+    const moved = await editor(action("ternleaf_reference_changes")(host, {}), { reference: () => ({ result: {
+      reference: "examples/welcome-to-ternleaf.docx", checked: 0, head: 3,
+      changes: passageChanges([["a", "Costs 4 million."], ["b", "Opens in May."], ["c", " "]], [["a", "Costs 5 million."], ["d", "A new risk."]]) } }) });
+    assert.deepEqual(moved.changes, [{ change: "changed", before: "Costs 4 million.", after: "Costs 5 million." },
+      { change: "added", after: "A new risk." }, { change: "removed", before: "Opens in May." }]);
+    assert.deepEqual([moved.checkedRevision, moved.referenceRevision], [0, 3]);
+    assert.match(moved.next, /ternleaf_suggest/);
+    assert.deepEqual((await post("edition-checked", { lease, revision: 3 })).edition.checked, 3);
+    assert.match(promptContext(new Map([["main", host]]), { briefed: true }), /marked this edition as checked against revision 3/);
+    assert.equal((await post("edition-set", { lease, reference: null })).edition, null);
+    host.news();
+
     // The change record: what was accepted, for a reader who was not there.
     const record = await action("ternleaf_export")(host, { format: "changes" });
     assert.deepEqual([record.path, record.acceptedChanges], ["exports/Brief-changes-r0.md", 0]);
@@ -321,7 +346,7 @@ test("Copilot works on the document from the chat, and the author stays in contr
       }
       assert.match(promptContext(new Map([["main", closed]]), { briefed: true }), /only on requests that the author sends from the canvas/);
     } finally { await closed.close(); }
-    assert.deepEqual(seen.filter(Boolean), ["Copilot read the selected text."]);
+    assert.deepEqual([...new Set(seen.filter(Boolean))], ["Copilot read the selected text."]);
   } finally {
     await host.close();
     assert(existsSync(join(folder, ".ternleaf")));

@@ -65,10 +65,12 @@ Done:
 
 - **Back from Word, first form.** The name of an exported Word file carries its revision. **Merge a copy from Word** compares that revision with the copy that comes back, so only the changes from Word come to the review, one suggestion for each changed paragraph. A change that meets a change made here is shown as a conflict.
 
+- **Editions, first form.** A document can be an edition of a reference document. When the reference changes, the Review pane lists the changed passages, and Copilot proposes the updates of the edition through the ordinary review. The author marks the edition as checked.
+
 Open:
 
 3. **Back from Word, the rest.** New and removed paragraphs, formatting and comments from the copy are counted, but not merged. The engine's own Review, Compare shows them.
-4. **Editions.** One project with several documents for different readers. See below. Not started.
+4. **Editions, the rest.** See below.
 
 ### All the time: the page
 
@@ -87,6 +89,8 @@ Two views of one document: a continuous view for writing and a pages view with t
 An outline of the real document with word counts and page spans. Moving a section moves its content with its notes, figures, comments and references. The deterministic move is separate from any proposed rewrite of transitions, and the author sees the consequences, such as a broken reference or a figure on another page, before they accept.
 
 ### Editions
+
+The first form is done: an edition knows its reference and the revision that it was checked against, and the changed passages of the reference come up for review. What remains is the record of which passages correspond, and the policies below.
 
 One project with several documents for different readers, for example a technical paper, a two-page decision brief and an implementation note. Each edition owns its prose and layout. The project records which passages correspond and what must stay consistent:
 
