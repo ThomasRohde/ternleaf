@@ -73,6 +73,10 @@ A whole-document request works the same way with one difference. The editor send
 
 No action applies an edit. The author's acceptance in the canvas is the only way to a new revision. The only file that an action writes is an export, and the only folder is `exports`.
 
+## A copy from Word
+
+The name of an exported Word file has its revision. When the file comes back, the editor builds that revision again from the source and the journal, and the engine compares it with the copy. The result is what changed in Word, and not what changed in Ternleaf since the export. [`merge.mjs`](../apps/editor/merge.mjs) makes one suggestion for each changed paragraph, and the host saves them as a suggestion list with the origin "word". From there the path is the ordinary review. A suggestion whose text is no longer in the document is a conflict, and the author merges it by hand.
+
 ## A request from the chat
 
 The author can also ask in the chat. Then no request exists when Copilot starts, and the host must get the text from the editor, because only the engine there can read the document.

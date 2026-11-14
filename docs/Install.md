@@ -48,6 +48,7 @@ To continue in Word and come back, export from Ternleaf, edit the export in Word
 | `source` | The document that opens in a project where no document was opened before. |
 | `state` | The SQLite project file for `source`. Set both or neither. |
 | `engine` | The folder of the OpenDoc web application. The default is `engine/prebuilt/webapp`. |
+| `rules` | The path of the house rules file. The default is `ternleaf.rules.md` in the project folder. |
 | `chat` | Set it to `false` to keep Copilot to the requests that you send from the canvas. Copilot then cannot read the document for a request in the chat. |
 
 Paths are relative to the project folder or absolute.
@@ -78,10 +79,29 @@ The editor's settings, such as the theme, the language, your name for comments a
 - **Ask in place.** Select text in one paragraph. Choose a quick request in the bubble, or choose **Ask Copilot** and write an instruction. Ctrl+Enter sends it. Ctrl+Shift+Space opens the Review pane.
 - **Review.** Compare the changed words and the page before and after. Switch between the options if Copilot gave more than one. **Edit the text** changes the proposal yourself. **Accept change** saves a revision. **Discard** and **Ask again** leave the document as it is.
 - **Ask in the chat.** Type your request in the Copilot chat, for example "Proofread the document", "Make the selected sentence more formal" or "Export a PDF". Copilot reads the current text through the canvas, and a notice tells you when it does. Its proposals come to the Review pane with the label **From the chat**. An export goes into the `exports` folder of the project. You can start a request with `/ternleaf`, for example `/ternleaf open docs/brief.docx`.
+- **House rules.** Put your writing rules in `ternleaf.rules.md` in the project folder. [`examples/ternleaf.rules.example.md`](../examples/ternleaf.rules.example.md) is a starting point. Copilot gets the rules with every read, and the Review pane names the file. Then ask "Review this document against the house rules".
+- **Checks.** Rules with a fixed form go into a block in the rules file. Ternleaf checks them itself after every change and shows the ones that fail at the top of the Review pane:
+
+  ````
+  ```ternleaf
+  max-pages: 2
+  max-words: 800
+  max-sentence-words: 25
+  require-heading: Recommendation
+  avoid: utilize => use
+  ```
+  ````
+
+- **Remarks.** In a review, Copilot can leave a remark where no new text can solve a problem. A remark quotes the text and says what Copilot noticed. **Add as comment** puts it into the document as a Word comment. Choose **Done** when you have dealt with it.
+- **Wide changes.** A proposal can replace text across bold and plain text. The new text gets the formatting of the first replaced word. The review warns you and shows the page after the change. A proposal can also add paragraphs.
+- **Tracked changes.** Switch the editor from Editing to Suggesting. A proposal that you accept then becomes a Word tracked change. Set your name in the editor's settings first.
+- **A copy from Word.** Export a Word file and keep its name: the name has the revision, for example `brief-r12.docx`. When the edited file comes back, choose the arrow next to **Export DOCX**, then **Merge a copy from Word**. The text changes from Word come to the review as suggestions. A paragraph that also changed here is shown as a conflict: merge it by hand. New paragraphs and formatting from the copy are counted, not merged. **Review → Compare** shows them.
+- **Fit to a length.** Ask in the chat, for example "Fit this document to two pages". Copilot measures its cuts on a copy before it suggests them.
+- **Change record.** In the History tab, **Download the change record** writes a Markdown file with every accepted change, its request, its reason and your note.
 - **Whole document.** Choose **Whole document**, then a quick review or your own instruction. **Review** opens a suggestion as a proposal. **Accept change** goes to the next one, and **Skip** leaves the text as it is.
 - **History.** The History tab lists every revision. Undo and redo are revisions too. Ternleaf saves each change at once, so there is nothing to save by hand: Ctrl+S confirms the saved revision.
 - **Export.** **Export DOCX** downloads the current revision as a Word file. The arrow next to it offers PDF, Markdown, web page and plain text. If a Word export would leave out a known legacy part of the source, Ternleaf explains it and asks first. If it would lose anything else, Ternleaf refuses the Word export, and the other formats still work.
-- **Suggesting mode.** The editor's Suggesting mode records your own edits as tracked changes. Switch to Editing to accept a Copilot proposal.
+- **Suggesting mode.** The editor's Suggesting mode records your own edits as tracked changes, and an accepted Copilot proposal too.
 - **Recover.** If the canvas loses its connection, choose **Reload**. The canvas opens the last saved revision. A proposal that Copilot already sent is still there.
 
 One document can be open in one canvas at a time. A second canvas waits and opens the document when the first one closes.

@@ -64,6 +64,11 @@ export function layout() {
     <div class="tl-body">
       <section role="tabpanel" id="tl-view-review" data-view="review" aria-labelledby="tl-tab-review">
         <div data-part="compose" class="tl-stack">
+          <section class="tl-checks" data-part="checks" hidden>
+            <h3 data-part="checks-title"></h3>
+            <ul data-part="checks-list"></ul>
+            <p class="tl-help" data-part="checks-file"></p>
+          </section>
           <section class="tl-queue" data-part="queue" hidden>
             <header>
               <h3 data-part="queue-title"></h3>
@@ -118,6 +123,8 @@ export function layout() {
             <p class="tl-slip-meta"><span data-part="count"></span>
               <button type="button" class="tl-link" data-action="edit">Edit the text</button></p>
           </div>
+          <p class="tl-caution" data-part="mixed" hidden>This change replaces text with more than one kind of formatting, for example bold and plain. The new text gets the formatting of the first replaced word. Look at the page after the change.</p>
+          <p class="tl-caution" data-part="tracked" hidden>Suggesting mode is on. If you accept, the change goes into the document as a tracked change, for a reader who reviews in Word.</p>
           <p class="tl-rationale" data-part="rationale" hidden><span>Copilot</span> <span data-part="rationale-text"></span></p>
           <div class="tl-preview">
             <div class="tl-preview-bar">
@@ -155,6 +162,8 @@ export function layout() {
       </section>
       <section role="tabpanel" id="tl-view-history" data-view="history" aria-labelledby="tl-tab-history" hidden>
         <p class="tl-help" data-part="history-empty">No saved changes yet. Each edit and each accepted proposal becomes a revision.</p>
+        <button type="button" class="tl-link" data-action="record" hidden
+          title="A Markdown file with every accepted change: the request, the reason, the text before and after, and your note.">Download the change record</button>
         <ol class="tl-history" data-part="history"></ol>
         <button type="button" class="tl-link" data-action="retry" hidden
           title="Check that the last accepted change is saved. It is not applied a second time.">Retry last acceptance</button>
@@ -170,6 +179,8 @@ export function layout() {
           <button type="button" role="menuitem" data-action="export-as" data-command="file.export.markdown">Markdown</button>
           <button type="button" role="menuitem" data-action="export-as" data-command="file.export.html">Web page</button>
           <button type="button" role="menuitem" data-action="export-as" data-command="file.export.text">Plain text</button>
+          <button type="button" role="menuitem" data-action="merge" class="tl-menu-rule"
+            title="Choose a Word file that was exported here and edited in Word. Its changes come to the review.">Merge a copy from Word…</button>
         </div>
       </div>
       <button type="button" class="tl-link" data-action="word-evidence" hidden>Download Word comparison data</button>

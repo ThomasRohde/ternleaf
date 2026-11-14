@@ -1,6 +1,7 @@
 // The actions that Copilot can call on an open Ternleaf canvas. Each action
 // is data (name, description, input schema) and one function of the host.
 // The Copilot extension adds the canvas instance and the error handling.
+import { Rejected } from "../../packages/session/store.mjs";
 import { guide, rules } from "./guide.mjs";
 
 const requestId = { type: "string", format: "uuid",
@@ -42,7 +43,7 @@ export const actions = [
   },
   {
     name: "ternleaf_read",
-    description: "Read the document. With a requestId: what the author shared from the canvas for that request, with the instructions and the rules for the answer. Without a requestId: the text of the current revision in numbered paragraphs, for a question or a request from the chat. The author is told that you read it.",
+    description: "Read the document. With a requestId: what the author shared from the canvas for that request, with the instructions and the rules for the answer. Without a requestId: the text of the current revision in numbered paragraphs, for a question or a request from the chat. The result has the house rules of the project, if it has any. The author is told that you read it.",
     inputSchema: { ...object({
       requestId,
       from: { type: "integer", minimum: 1, description: "Without a requestId only: the first paragraph number to return. Use the next field of an earlier result to continue a long document." },
@@ -50,7 +51,7 @@ export const actions = [
     run: async (host, input) => {
       if (input?.requestId) {
         const shared = host.readReview(input.requestId);
-        return { ...shared, reply: shared.scope === "document" ? rules.document : rules.passage };
+        return { ...shared, houseRules: host.houseRules(), reply: shared.scope === "document" ? rules.document : rules.passage };
       }
       const text = await host.read({ from: input?.from });
       return { ...text, reply: rules.chat(text.revision) };
@@ -61,7 +62,7 @@ export const actions = [
     description: "Propose replacement text for one passage. The author reviews it in the canvas: this action cannot apply an edit. With a requestId it answers that request. Without one it proposes a change to the text that the author has selected now, for a request from the chat.",
     inputSchema: object({
       requestId,
-      replacement: { type: "string", description: "The full replacement for the passage. Plain text for one paragraph: no line breaks or tabs, at most 4,000 characters, different from the original." },
+      replacement: { type: "string", description: "The full replacement for the passage. Plain text, at most 4,000 characters, different from the original. A line break starts a new paragraph. No tabs." },
       rationale,
       alternatives: { type: "array", maxItems: 2, items: { type: "string" },
         description: "Optional. One or two other full replacements for the author to choose from." },
@@ -77,23 +78,29 @@ export const actions = [
   },
   {
     name: "ternleaf_suggest",
-    description: "Send a list of suggested changes to the document text. The author reviews each one in the canvas: this action cannot apply an edit. With a requestId it answers that request. Without one it answers a request from the chat, for the text that you read with ternleaf_read.",
+    description: "Send a list of suggested changes and remarks on the document text. A suggestion replaces text. A remark points at text and says what you noticed, without a replacement. The author reviews each one in the canvas: this action cannot apply an edit. With a requestId it answers that request. Without one it answers a request from the chat, for the text that you read with ternleaf_read.",
     inputSchema: object({
       requestId,
       suggestions: {
         type: "array", minItems: 1, maxItems: 60,
-        description: "The changes, in document order.",
+        description: "The changes and remarks, in document order. Each item has a replacement or a remark, not both.",
         items: object({
           paragraph: { type: "integer", minimum: 1, description: "The paragraph number from ternleaf_read." },
-          find: { type: "string", description: "Text to replace, copied exactly from that paragraph. It must occur once in the paragraph. No line breaks or tabs." },
-          replacement: { type: "string", description: "The new text for the find text. An empty text removes the find text." },
-          rationale: { type: "string", maxLength: 600, description: "One short sentence for the author." },
-        }, ["paragraph", "find", "replacement"]),
+          find: { type: "string", description: "Text to replace or to remark on, copied exactly from that paragraph. It must occur once in the paragraph. No line breaks or tabs." },
+          replacement: { type: "string", description: "For a change: the new text for the find text. An empty text removes the find text. A line break in it starts a new paragraph." },
+          rationale: { type: "string", maxLength: 600, description: "For a change: one short sentence for the author." },
+          remark: { type: "string", minLength: 1, maxLength: 600, description: "For a remark: what you noticed about the find text and what the author can do, in one or two sentences. Use it when no replacement text can solve the problem, for example a claim without a source, a contradiction, a missing owner or date, or a breach of the house rules that needs the author's knowledge." },
+        }, ["paragraph", "find"]),
       },
       revision: { type: "integer", minimum: 0, description: "Without a requestId only: the revision number from the ternleaf_read result that the paragraph numbers come from." },
       instructions,
     }, ["suggestions"]),
     run: (host, input) => {
+      for (const item of input.suggestions ?? []) {
+        if ((item.replacement === undefined) === (item.remark === undefined)) {
+          throw new Rejected("invalid-suggestions", "Each suggestion needs a replacement or a remark, and not both.");
+        }
+      }
       if (input.requestId) return { ...host.submitSuggestions(input.requestId, input.suggestions), next: after.suggestions };
       return { ...host.suggestFromChat(input), next: after.suggestions };
     },
@@ -124,10 +131,32 @@ export const actions = [
     name: "ternleaf_export",
     description: "Write the current revision of the document as a file into the exports folder of the project, and get its path. Use it when the author asks for a file, or when another tool needs the document. Never copy or convert the .docx file on disk: it does not have the saved revisions.",
     inputSchema: object({
-      format: { type: "string", enum: ["docx", "pdf", "markdown", "html", "text"], description: "docx is a Word file. markdown keeps headings, lists and tables as text." },
+      format: { type: "string", enum: ["docx", "pdf", "markdown", "html", "text", "changes"], description: "docx is a Word file. markdown keeps headings, lists and tables as text. changes is the change record: a Markdown file with every change that the author accepted, the request, the reason and the author's note." },
     }, ["format"]),
-    run: async (host, input) => ({ ...await host.exportDocument(input.format),
+    run: async (host, input) => input.format === "changes" ? host.exportRecord() : ({ ...await host.exportDocument(input.format),
       next: "The file is in the project folder at the path. It is a copy: a change to it does not change the document in the canvas." }),
+  },
+  {
+    name: "ternleaf_measure",
+    description: "Find out how long the document would be if the author accepted a list of changes. The engine lays out a copy with the changes and returns the real number of pages and words, now and after. Nothing is saved and the author sees nothing. Use it to fit a document to a length, and to check that your changes can be applied, before you call ternleaf_suggest.",
+    inputSchema: object({
+      revision: { type: "integer", minimum: 0, description: "The revision number from the ternleaf_read result that the paragraph numbers come from." },
+      suggestions: {
+        type: "array", minItems: 1, maxItems: 60,
+        description: "The changes to try, in the same form as for ternleaf_suggest.",
+        items: object({
+          paragraph: { type: "integer", minimum: 1, description: "The paragraph number from ternleaf_read." },
+          find: { type: "string", description: "Text to replace, copied exactly from that paragraph. It must occur once in the paragraph." },
+          replacement: { type: "string", description: "The new text for the find text. An empty text removes the find text." },
+        }, ["paragraph", "find", "replacement"]),
+      },
+    }, ["revision", "suggestions"]),
+    run: async (host, input) => {
+      const result = await host.measure(input);
+      return { ...result, next: result.cannotApply.length
+        ? "Some changes cannot be applied. Leave them out or change them before you call ternleaf_suggest."
+        : "To propose these changes to the author, call ternleaf_suggest with the same suggestions." };
+    },
   },
   {
     name: "ternleaf_documents",

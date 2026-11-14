@@ -1,6 +1,7 @@
 import { open as openDoc } from "/pkg/casual_doc_wasm.js";
 import { authorDecides, validateDocxExport } from "./export-policy.mjs";
 import { reviewChange } from "./review-change.mjs";
+import { runChecks } from "./checks.mjs";
 import { forAuthor } from "./messages.mjs";
 import { captureWordEvidence } from "./word-evidence.mjs";
 import { wordCount, wordDiff } from "./diff.mjs";
@@ -143,7 +144,7 @@ export function attachTernleaf(editor) {
       draft = undefined;
       proposal = undefined;
       dropPreview();
-      void call("history", { lease }).then(state => { reviewed = state.accepted; renderHistory(); render(); }).catch(() => {});
+      void call("history", { lease }).then(state => { reviewed = state.accepted; houseRules = state.rules; renderHistory(); render(); }).catch(() => {});
       if (record.id === advanceAfter) queueMicrotask(() => void nextSuggestion());
     }
     updateDiagnostics();
@@ -256,6 +257,7 @@ export function attachTernleaf(editor) {
     captureWordComparison = state.captureWordComparison;
     journal = state.journal;
     reviewed = state.accepted ?? [];
+    houseRules = state.rules ?? null;
     name = state.name ?? name;
     part("name").textContent = startCard.querySelector('[data-part="start-name"]').textContent = name;
     part("name").title = name;
@@ -310,6 +312,8 @@ export function attachTernleaf(editor) {
   const told = new Map();   // Notices already shown, with the time.
   let pulsing = false;
   let chatStamp;
+  let shownChecks = -1;
+  let rulesStamp;
   let counted = { revision: -1, words: null };
   // The author sees what Copilot takes from the canvas. One notice of a kind
   // every 20 seconds is enough.
@@ -384,6 +388,69 @@ export function attachTernleaf(editor) {
     } finally { output.free(); }
   }
 
+  // Merge a copy that comes back from Word. The name of a Ternleaf export
+  // carries its revision: that revision is the base. The engine compares
+  // the base with the copy, so the result is what changed in Word, and not
+  // what changed here since the export. Each text change becomes a
+  // suggestion in the ordinary review.
+  async function mergeFromWord(content, fileName) {
+    const { exportedRevision, suggestionsFromComparison } = await import("/ternleaf/merge.mjs");
+    const { diffVersions } = await import("/pkg/casual_doc_wasm.js");
+    const named = exportedRevision(fileName);
+    const base = named !== null && named <= journal.length ? named : journal.length;
+    const sample = openDoc(source);
+    let comparison;
+    let found;
+    try {
+      for (const font of fonts) sample.registerFont(font);
+      for (const record of journal.slice(0, base)) sample.replayDurableFrame(JSON.stringify(record.frame));
+      const output = sample.exportAs("org.openxmlformats.wordprocessingml.document", base ? "preserve_when_safe" : "exact_if_unchanged");
+      try { comparison = JSON.parse(diffVersions(output.bytes, content)); }
+      catch { throw new Error("Ternleaf cannot read this file as a Word document."); }
+      finally { output.free(); }
+      found = suggestionsFromComparison(comparison.changes, node => {
+        try { return sample.copyText(node, 0, node, sample.paragraphLength(node)); } catch { return null; }
+      });
+    } finally { sample.free(); }
+    const count = (number, word) => `${number} ${word}${number === 1 ? "" : "s"}`;
+    if (!found.suggestions.length) {
+      toast(found.other ? `No text changes to merge. ${count(found.other, "other change")}: see Review, Compare.`
+        : "The copy has the same text as the exported revision.");
+      return;
+    }
+    const summary = `Changes from ${fileName}, made in Word after revision ${base}`
+      + (named === null ? " (the file name has no revision, so the copy was compared with the document as it is now)" : "") + "."
+      + (found.other ? ` ${count(found.other, "other change")}, such as a new paragraph or formatting, ${found.other === 1 ? "is" : "are"} not in this list: see Review, Compare.` : "");
+    syncBatch(await call("merge", { lease, revision: journal.length, summary, changes: found.suggestions }));
+    setOpen(true);
+    showView("review");
+  }
+
+  // Lay out a copy of the document with a list of changes applied, and
+  // count its pages. Nothing is saved and the page on screen does not move.
+  function measureForCopilot(changes) {
+    const sample = openDoc(source);
+    try {
+      for (const font of fonts) sample.registerFont(font);
+      for (const record of journal) sample.replayDurableFrame(JSON.stringify(record.frame));
+      const count = doc => { try { const stats = doc.documentStats(); const { words } = stats; stats.free(); return words; } catch { return null; } };
+      const before = { pages: sample.pageCount, words: count(sample) };
+      const blocked = [];
+      (Array.isArray(changes) ? changes : []).forEach(({ node, find, replacement }, index) => {
+        try {
+          const text = sample.copyText(node, 0, node, sample.paragraphLength(node));
+          const at = text.indexOf(find);
+          if (at < 0 || text.indexOf(find, at + 1) >= 0) throw new Error("the find text is not there once after the earlier changes");
+          const start = bytes(text.slice(0, at));
+          const change = reviewChange({ node, start, end: start + bytes(find), before: find, replacement });
+          try { checkReviewRun(node, change, sample); } catch { throw new Error("the change touches a link, a tab, a line break or an object"); }
+          applyChange(sample, node, change, "Preview").free();
+        } catch (error) { blocked.push({ index, reason: String(error.message ?? error) }); }
+      });
+      return { pagesBefore: before.pages, wordsBefore: before.words, pagesAfter: sample.pageCount, wordsAfter: count(sample), blocked };
+    } finally { sample.free(); }
+  }
+
   async function doJob(job) {
     let answer;
     try {
@@ -391,6 +458,7 @@ export function attachTernleaf(editor) {
       const result = job.kind === "read" ? readForCopilot()
         : job.kind === "page" ? pageForCopilot(job.page)
         : job.kind === "export" ? exportForCopilot(job.format)
+        : job.kind === "measure" ? measureForCopilot(job.changes)
         : (() => { throw refusal("invalid-request"); })();
       answer = { result };
     } catch (error) {
@@ -405,10 +473,21 @@ export function attachTernleaf(editor) {
     try {
       const selection = live ?? (stillThere(captured) ? captured : null);
       const state = await call("pulse", { lease, live: { revision: journal.length, pages: editor.doc.pageCount,
-        words: wordTotal(), suggesting: Boolean(editor.doc.trackRevisions), selection } });
+        words: wordTotal(), suggesting: Boolean(editor.doc.trackRevisions), selection,
+        failing: houseChecks().filter(result => !result.ok).map(result => result.text) } });
+      if (checked.revision !== shownChecks) { shownChecks = checked.revision; renderChecks(); }
       const changed = chatStamp !== undefined && state.stamp !== chatStamp;
       chatStamp = state.stamp;
       for (const line of state.notices ?? []) tell(String(line).slice(0, 200));
+      if (state.rules !== rulesStamp) {
+        // The rules file is new or changed. Read it again.
+        const first = rulesStamp === undefined;
+        rulesStamp = state.rules;
+        if (!first || !houseRules !== !state.rules) {
+          houseRules = (await call("history", { lease })).rules;
+          checked = { revision: -1, results: [] };
+        }
+      }
       for (const job of state.jobs) {
         if (jobsDone.has(job.id)) continue;
         jobsDone.add(job.id);
@@ -492,21 +571,65 @@ export function attachTernleaf(editor) {
   }
 
   // ---- Review -----------------------------------------------------------
-  function checkReviewRun(node, change) {
-    const doc = editor.doc;
+  // Check that the engine can apply a text change, and say how. The engine
+  // gives new text the formatting of the character before it. So that the
+  // new text keeps the formatting of the text it replaces, the result names
+  // two formats: `format` of the first replaced character and `before` of
+  // the character before the change. `mixed` is true when the replaced text
+  // has more than one formatting, or when a formatting cannot be carried
+  // over: some of it is lost, and the review says so.
+  // A change that touches a link, a tab, a line break or an object is refused.
+  function checkReviewRun(node, change, doc = editor.doc) {
     const length = doc.paragraphLength(node);
     const runs = JSON.parse(doc.copyRichRuns(node, 0, node, length));
+    const formatOf = run => Object.fromEntries(Object.entries(run).filter(([key]) => key !== "text" && key !== "paragraphBreak"));
+    const signature = format => JSON.stringify(Object.entries(format).sort());
     let end = 0;
-    let supported = false;
+    let before = null;
+    const touched = [];
     for (const run of runs) {
       const start = end;
       end += bytes(run.text);
-      if (!run.href && !/[\r\n\t￼]/.test(run.text)
-        && change.start >= start && change.end <= end && change.end - change.start < end - start) supported = true;
+      if (change.start > start && change.start <= end) before = formatOf(run);
+      const overlaps = change.end > change.start ? change.start < end && change.end > start : change.start >= start && change.start <= end;
+      if (!overlaps) continue;
+      if (run.href || /[\r\n\t\uFFFC]/.test(run.text)) {
+        throw new Error("This change touches a link, a tab, a line break or an object. Ternleaf cannot apply it. Discard it, then select the text beside it.");
+      }
+      touched.push(formatOf(run));
     }
-    if (!supported || end !== length) {
-      throw new Error("This change crosses a formatting boundary. Ternleaf can apply a change inside one run of text with the same formatting. Discard it, then select a smaller passage.");
+    if (end !== length) throw new Error("This paragraph has content that Ternleaf cannot change. Discard the proposal.");
+    const format = touched[0] ?? {};
+    const same = !before || signature(before) === signature(format);
+    // What the new text must switch off to differ from the text before it.
+    // Only an on/off formatting, such as bold, can be switched off.
+    const off = same ? {} : Object.fromEntries(Object.entries(before).filter(([key]) => !(key in format)).map(([key, value]) => [key, value === true ? false : undefined]));
+    const lost = Object.values(off).some(value => value === undefined);
+    return { format, same, off: Object.fromEntries(Object.entries(off).filter(([, value]) => value !== undefined)),
+      mixed: change.end > change.start && change.inserted !== ""
+        && (touched.some(item => signature(item) !== signature(format)) || lost) };
+  }
+
+  // Apply a reviewed change to a document as one revision. The store checks
+  // the frame that the engine makes, so each way to apply a change has a
+  // form that the store knows (frameDoesChange).
+  function applyChange(doc, node, change, author = null) {
+    const { format, same, off } = checkReviewRun(node, change, doc);
+    if (doc.trackRevisions) {
+      // Suggesting mode: the change becomes a tracked change, for a reader
+      // who reviews in Word.
+      if (change.inserted.includes("\n")) throw new Error("Switch from Suggesting to Editing to accept a proposal with a new paragraph.");
+      // Without `author`, the engine uses the name that the author set for
+      // comments and suggestions.
+      return doc.suggestReplace(node, change.start, change.end, change.inserted, author, null, null);
     }
+    if (!change.inserted || (same && !change.inserted.includes("\n"))) {
+      return doc.replaceSelection(node, change.start, node, change.end, change.inserted);
+    }
+    const style = same ? {} : { ...off, ...format };
+    const runs = change.inserted.split("\n").flatMap((line, index) =>
+      [...(index ? [{ text: "", paragraphBreak: true }] : []), ...(line ? [{ ...style, text: line }] : [])]);
+    return doc.pasteRichRuns(node, change.start, node, change.end, JSON.stringify(runs));
   }
 
   async function syncReviews(state, opening = false, force = false) {
@@ -584,8 +707,7 @@ export function attachTernleaf(editor) {
     const { node, start, end, before } = candidate;
     if (editor.doc.copyText(node, start, node, end) !== before) throw new Error("The passage changed after this proposal. Discard it, then ask again.");
     const change = reviewChange(candidate);
-    checkReviewRun(node, change);
-    const next = { view: "after", whole: false };
+    const next = { view: "after", whole: false, mixed: checkReviewRun(node, change).mixed, tracked: Boolean(editor.doc.trackRevisions) };
     const sample = openDoc(source);
     try {
       for (const font of fonts) sample.registerFont(font);
@@ -594,13 +716,13 @@ export function attachTernleaf(editor) {
       const beforeCanvas = renderPageCanvas(editor.doc, beforePage);
       next.before = { canvas: beforeCanvas,
         focus: mark(beforeCanvas, editor.doc, node, change.start, change.end, beforePage, "#f7c6c0") };
-      const result = sample.replaceSelection(node, change.start, node, change.end, change.inserted);
+      const result = applyChange(sample, node, change, "Preview");
       try { if (result.revision !== candidate.revision + 1) throw new Error("The selected range cannot be edited"); }
       finally { result.free(); }
       const [afterPage = 1] = sample.caretRect(node, change.start);
       const afterCanvas = renderPageCanvas(sample, afterPage);
       next.after = { canvas: afterCanvas,
-        focus: mark(afterCanvas, sample, node, change.start, change.start + bytes(change.inserted), afterPage, "#b9e6cf") };
+        focus: mark(afterCanvas, sample, node, change.start, change.start + bytes(change.inserted.split("\n")[0]), afterPage, "#b9e6cf") };
       next.pages = { before: editor.doc.pageCount, after: sample.pageCount };
     } finally { sample.free(); }
     preview = next;
@@ -649,18 +771,13 @@ export function attachTernleaf(editor) {
       throw new Error("The proposal is stale");
     }
     if (pending) throw new Error("Another edit is being accepted");
-    // In Suggesting mode the engine records an edit as a tracked change. That
-    // is not the reviewed change, so the store would refuse it.
-    if (editor.doc.trackRevisions) {
-      throw new Error("Switch from Suggesting to Editing to accept a proposal. Ternleaf keeps each accepted change as a revision.");
-    }
     await call("review-note", { lease, id, note: authoredNote });
     if (pending || revision !== journal.length) throw new Error("The proposal is stale");
     const change = reviewChange(candidate);
     checkReviewRun(node, change);
     pending = { id, fingerprint, editorial, reviewId: id };
     let result;
-    try { result = editor.doc.replaceSelection(node, change.start, node, change.end, change.inserted); }
+    try { result = applyChange(editor.doc, node, change); }
     finally { pending = undefined; }
     if (result.revision !== revision + 1) {
       result.free();
@@ -694,13 +811,14 @@ export function attachTernleaf(editor) {
   // ---- Whole-document review --------------------------------------------
   let advanceAfter = null;  // The review whose acceptance opens the next suggestion.
   let batchOrigin = "canvas";
+  let houseRules = null;    // The path of the project's rules file, if any.
 
   function syncBatch(state, opening = false) {
     // An answer from the chat arrives complete: there was no waiting state.
     const arrived = Boolean(state.batch) && state.batch.id !== batch?.id && state.batch.state !== "waiting";
     const answered = arrived || (batch?.state === "waiting" && state.batch?.state !== "waiting");
     batch = state.batch;
-    batchOrigin = state.origin === "chat" ? "chat" : "canvas";
+    batchOrigin = ["chat", "word"].includes(state.origin) ? state.origin : "canvas";
     suggestions = state.suggestions;
     if (state.unanswered) batchStopped = "Copilot finished without suggestions. Read the chat for the reason.";
     if (batch && batch.state === "waiting" && batch.fence !== lease.fence) {
@@ -724,12 +842,12 @@ export function attachTernleaf(editor) {
     try { text = editor.doc.copyText(node, 0, node, editor.doc.paragraphLength(node)); }
     catch { return { reason: "The paragraph is no longer in the document." }; }
     const at = text.indexOf(find);
-    if (at < 0) return { reason: "The text changed after Copilot read it." };
+    if (at < 0) return { reason: batchOrigin === "word" ? "This text also changed here. Merge it by hand." : "The text changed after Copilot read it." };
     if (text.indexOf(find, at + 1) >= 0) return { reason: "The text occurs more than once in the paragraph." };
     const start = bytes(text.slice(0, at));
     const passage = { node, start, end: start + bytes(find), before: find, revision: journal.length };
     try { checkReviewRun(node, reviewChange({ ...passage, replacement })); }
-    catch { return { reason: "The change crosses a formatting boundary." }; }
+    catch { return { reason: "The change touches a link, a tab or an object." }; }
     return { passage };
   }
 
@@ -748,7 +866,7 @@ export function attachTernleaf(editor) {
     if (blocked || draft) return;
     try {
       syncBatch(await call("suggestions", { lease }));
-      const next = suggestions.find(item => item.state === "open" && locate(item).passage);
+      const next = suggestions.find(item => item.state === "open" && item.kind !== "remark" && locate(item).passage);
       if (next) await adopt(next);
       else if (suggestions.length) message("All suggestions reviewed", "ok");
     } catch (error) { report(error); render(); }
@@ -854,9 +972,13 @@ export function attachTernleaf(editor) {
     const queue = part("queue");
     queue.hidden = !batch || batch.state === "waiting";
     if (queue.hidden) return;
-    const open = suggestions.filter(item => item.state === "open").length;
+    const open = suggestions.filter(item => item.state === "open" && item.kind !== "remark").length;
+    const remarks = suggestions.filter(item => item.state === "open" && item.kind === "remark").length;
+    const plural = (number, word) => `${number} ${word}${number === 1 ? "" : "s"}`;
     part("queue-title").textContent = batch.state === "declined" ? "Copilot suggested no changes"
-      : open ? `${open} ${open === 1 ? "suggestion" : "suggestions"} to review` : "All suggestions reviewed";
+      : open && remarks ? `${plural(open, "suggestion")} and ${plural(remarks, "remark")} to review`
+      : open ? `${plural(open, "suggestion")} to review`
+      : remarks ? `${plural(remarks, "remark")} to read` : "All suggestions reviewed";
     part("queue-prompt").textContent = batch.prompt;
     part("queue-prompt").dataset.origin = batchOrigin;
     part("queue-reason").hidden = batch.state !== "declined";
@@ -866,6 +988,39 @@ export function attachTernleaf(editor) {
       row.dataset.state = item.state;
       const slip = document.createElement("p");
       slip.className = "tl-slip tl-slip-small";
+      if (item.kind === "remark") {
+        // A remark has no change to review. It quotes the text and says
+        // what Copilot noticed. The author decides what to do about it.
+        row.dataset.kind = "remark";
+        slip.textContent = item.find;
+        const said = document.createElement("p");
+        said.className = "tl-remark";
+        said.textContent = item.rationale;
+        row.append(slip, said);
+        const actions = document.createElement("div");
+        actions.className = "tl-actions";
+        const control = document.createElement("button");
+        control.type = "button";
+        control.className = "tl-link";
+        control.dataset.action = item.state === "skipped" ? "restore" : "skip";
+        control.dataset.id = item.id;
+        control.textContent = item.state === "skipped" ? "Restore" : "Done";
+        if (item.state === "skipped") actions.append(Object.assign(document.createElement("span"), { className: "tl-help", textContent: "Done" }));
+        else if (locate({ ...item, replacement: item.find + " " }).passage) {
+          // Keep the remark with the document, as a Word comment on the text.
+          const keep = document.createElement("button");
+          keep.type = "button";
+          keep.className = "tl-button";
+          keep.dataset.action = "comment";
+          keep.dataset.id = item.id;
+          keep.textContent = "Add as comment";
+          keep.title = "Adds the remark to the document as a Word comment on this text.";
+          actions.append(keep);
+        }
+        actions.append(control);
+        row.append(actions);
+        return row;
+      }
       slip.append(...diffNodes(item.find, item.replacement));
       row.append(slip);
       if (item.rationale) {
@@ -935,7 +1090,7 @@ export function attachTernleaf(editor) {
     }
     if (current === "proposal") {
       part("asked").textContent = draft.prompt;
-      part("asked").dataset.origin = draft.origin === "chat" || (draft.suggestion && batchOrigin === "chat") ? "chat" : "canvas";
+      part("asked").dataset.origin = draft.origin ?? (draft.suggestion ? batchOrigin : "canvas");
       const adopted = Boolean(draft.suggestion);
       const position = suggestions.findIndex(item => item.id === draft.suggestion);
       part("step").hidden = position < 0;
@@ -966,6 +1121,8 @@ export function attachTernleaf(editor) {
       const to = wordCount(draft.replacement);
       part("count").textContent = from === to ? `${to} words` : `${from} → ${to} words`;
       part("rationale").hidden = !draft.rationale;
+      part("mixed").hidden = !preview?.mixed;
+      part("tracked").hidden = !preview?.tracked;
       part("rationale-text").textContent = draft.rationale ?? "";
       button("save-note").hidden = note.value === draft.note;
       paintPreview();
@@ -989,6 +1146,37 @@ export function attachTernleaf(editor) {
     signature = "";
   }
 
+  // The house rules with a fixed form, checked against the document as it
+  // is now. The result is kept for one revision.
+  let checked = { revision: -1, results: [] };
+  function houseChecks() {
+    if (!houseRules?.checks?.length || !editor.doc) return [];
+    if (checked.revision !== journal.length) {
+      let results = [];
+      try {
+        const paragraphs = JSON.parse(editor.doc.searchableText()).map(([, text]) => text).filter(text => text.trim());
+        let headings = [];
+        try { headings = Array.from(editor.doc.documentOutline()).map(row => String(row).split("\t").slice(3).join(" ")); } catch { /* No outline. */ }
+        results = runChecks(houseRules.checks, { pages: editor.doc.pageCount, words: wordTotal() ?? 0, paragraphs, headings });
+      } catch { /* A check that cannot run reports nothing. */ }
+      checked = { revision: journal.length, results };
+    }
+    return checked.results;
+  }
+  function renderChecks() {
+    const section = part("checks");
+    section.hidden = !houseRules;
+    if (!houseRules) return;
+    const results = houseChecks();
+    const failing = results.filter(result => !result.ok);
+    part("checks-title").textContent = !results.length ? "House rules"
+      : failing.length ? `House rules: ${failing.length} of ${results.length} checks fail` : `House rules: all ${results.length} checks pass`;
+    section.dataset.state = failing.length ? "failing" : "passing";
+    part("checks-file").textContent = `Copilot follows ${houseRules.path}.`;
+    part("checks-list").replaceChildren(...failing.map(result =>
+      Object.assign(document.createElement("li"), { textContent: result.text })));
+  }
+
   function renderHistory() {
     const list = part("history");
     const byRevision = new Map(reviewed.map(entry => [entry.revision, entry]));
@@ -1003,6 +1191,8 @@ export function attachTernleaf(editor) {
     }
     part("history-count").textContent = journal.length ? String(journal.length) : "";
     part("history-empty").hidden = groups.length > 0;
+    button("record").hidden = reviewed.length === 0;
+    renderChecks();
     list.replaceChildren(...groups.reverse().map(group => {
       const row = document.createElement("li");
       row.dataset.kind = group.kind;
@@ -1177,6 +1367,18 @@ export function attachTernleaf(editor) {
           else await request(prompt.value);
           break;
         case "adopt": await adopt(suggestions.find(item => item.id === target.dataset.id)); break;
+        case "comment": {
+          // A comment is the author's own edit: it is a revision like any
+          // other, and it goes into the Word export.
+          const item = suggestions.find(entry => entry.id === target.dataset.id);
+          const { passage } = locate({ ...item, replacement: item.find + " " });
+          if (!passage) throw new Error("The text of this remark changed. Choose Done.");
+          const result = editor.doc.addComment(passage.node, passage.start, passage.node, passage.end, item.rationale, "Copilot", "C", new Date().toISOString());
+          await editor.refresh(result);
+          syncBatch(await call("suggestion-state", { lease, id: item.id, state: "skipped" }));
+          toast("The remark is now a comment in the document.");
+          break;
+        }
         case "skip": case "restore":
           syncBatch(await call("suggestion-state", { lease, id: target.dataset.id, state: action === "skip" ? "skipped" : "open" }));
           break;
@@ -1260,6 +1462,23 @@ export function attachTernleaf(editor) {
           if (preview) { preview.whole = !preview.whole; paintPreview(); }
           break;
         case "export": await download(); break;
+        case "merge": {
+          closeExportMenu();
+          const picker = Object.assign(document.createElement("input"), { type: "file", accept: ".docx" });
+          picker.addEventListener("change", () => {
+            const [file] = picker.files;
+            if (file) void file.arrayBuffer().then(buffer => mergeFromWord(new Uint8Array(buffer), file.name))
+              .catch(error => { message(error.message ?? String(error), "problem"); render(); });
+          });
+          picker.click();
+          break;
+        }
+        case "record": {
+          const { changeRecord } = await import("/ternleaf/record.mjs");
+          downloadFile(changeRecord({ document: name, revision: journal.length, changes: reviewed }), "text/markdown",
+            `${name.replace(/\.docx$/i, "")}-changes-r${journal.length}.md`);
+          break;
+        }
         case "word-evidence":
           if (wordEvidence) downloadFile(JSON.stringify(wordEvidence), "application/json",
             "Ternleaf-word-comparison-r" + wordEvidence.revision + ".json");

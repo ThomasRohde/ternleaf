@@ -7,8 +7,10 @@ import { actions } from "../apps/agent/actions.mjs";
 import { promptContext, toolAdvice } from "../apps/agent/context.mjs";
 import { brief, canvasPrompt, guide, rules, skill } from "../apps/agent/guide.mjs";
 import { createWorkspace } from "../apps/host/project.mjs";
+import { runChecks } from "../apps/editor/checks.mjs";
 import { startHost } from "../apps/host/serve.mjs";
 import { refusalForAgent } from "../packages/session/messages.mjs";
+import { changeRecord } from "../packages/session/record.mjs";
 import { Rejected } from "../packages/session/store.mjs";
 
 const docx = text => Buffer.concat([Buffer.from([0x50, 0x4b, 3, 4]), Buffer.from(text)]);
@@ -43,7 +45,7 @@ test("every action describes itself, and the guide names every action", () => {
   };
   for (const item of actions) {
     assert.match(item.name, /^ternleaf_[a-z_]+$/);
-    assert(item.description.length >= 60 && item.description.length <= 420, `${item.name} has a description of a useful length`);
+    assert(item.description.length >= 60 && item.description.length <= 520, `${item.name} has a description of a useful length`);
     assert.equal(item.inputSchema.additionalProperties, false, `${item.name} is closed`);
     assert.equal(typeof item.run, "function");
     walk(item.inputSchema, item.name);
@@ -65,7 +67,7 @@ test("every action describes itself, and the guide names every action", () => {
     assert(examples.length > 0, name + " has an example");
     for (const example of examples) {
       const keys = [...example.matchAll(/"([a-zA-Z]+)":/g)].map(match => match[1]);
-      const allowed = new Set([...fields("ternleaf_suggest"), ...fields("ternleaf_propose"), "paragraph", "find", "replacement", "rationale"]);
+      const allowed = new Set([...fields("ternleaf_suggest"), ...fields("ternleaf_propose"), "paragraph", "find", "replacement", "rationale", "remark"]);
       for (const key of keys) assert(allowed.has(key), `${key} in ${example}`);
     }
   }
@@ -215,6 +217,65 @@ test("Copilot works on the document from the chat, and the author stays in contr
     await refused(() => editor(action("ternleaf_export")(host, { format: "docx" }), { export: () => ({ error: "export-needs-author" }) }), "export-needs-author");
     assert(!workspace.documents().documents.some(item => item.path.startsWith("exports/")));
 
+    // A remark points at text and has no replacement. The author reads it.
+    await refused(() => action("ternleaf_suggest")(host, { instructions: "Review.", revision: 0,
+      suggestions: [{ paragraph: 2, find: "the plan", replacement: "it", remark: "Which plan?" }] }), "invalid-suggestions");
+    const reviewed = action("ternleaf_suggest")(host, { instructions: "Review against the house rules.", revision: 0, suggestions: [
+      { paragraph: 2, find: "the plan", remark: "Rule 2: name the plan and its date." },
+      { paragraph: 3, find: "leaks", replacement: "leaks in three places", rationale: "More exact." }] });
+    assert.equal(reviewed.suggested, 2);
+    const mixed = (await post("suggestions", { lease })).suggestions;
+    assert.deepEqual(mixed.map(item => [item.kind, item.find, item.replacement, item.rationale]),
+      [["remark", "the plan", "", "Rule 2: name the plan and its date."], [null, "leaks", "leaks in three places", "More exact."]]);
+    // A remark cannot become a proposal.
+    assert.equal((await post("adopt", { lease, id: mixed[0].id,
+      scope: { node: node(2), start: 30, end: 38, before: "the plan", revision: 0, note: "" } })).error, "unknown-review");
+    await post("discard-batch", { lease });
+    host.news();
+
+    // The length of the document with a list of changes, from the engine.
+    const measured = await editor(action("ternleaf_measure")(host, { revision: 0, suggestions: [
+      { paragraph: 3, find: "The roof is old. ", replacement: "" }, { paragraph: 2, find: "should approve", replacement: "approves" },
+      { paragraph: 8, find: "x", replacement: "y" }] }),
+      { measure: job => ({ result: { pagesBefore: 3, wordsBefore: 900, pagesAfter: 2, wordsAfter: 860,
+        blocked: job.changes[1].find === "should approve" ? [{ index: 1, reason: "the change crosses a formatting boundary" }] : [] } }) });
+    assert.deepEqual([measured.now, measured.after, measured.applied], [{ pages: 3, words: 900 }, { pages: 2, words: 860 }, 1]);
+    assert.deepEqual(measured.cannotApply, [{ suggestion: 3, reason: "unknown paragraph number" },
+      { suggestion: 2, reason: "the change crosses a formatting boundary" }]);
+    assert.match(measured.next, /cannot be applied/);
+    await refused(() => action("ternleaf_measure")(host, { revision: 5, suggestions: [{ paragraph: 1, find: "a", replacement: "b" }] }), "stale-document");
+
+    // The house rules of the project reach Copilot with the text.
+    assert.equal(action("ternleaf_status")(host, {}).houseRules, null);
+    writeFileSync(join(folder, "ternleaf.rules.md"), "1. Write in plain English.\n2. Name every plan and its date.\n");
+    assert.equal(action("ternleaf_status")(host, {}).houseRules, "ternleaf.rules.md");
+    assert.deepEqual((await editor(action("ternleaf_read")(host, {}), read)).houseRules,
+      { path: "ternleaf.rules.md", text: "1. Write in plain English.\n2. Name every plan and its date." });
+
+    // Rules with a fixed form are checked without a model. The editor
+    // reports the checks that fail, and Copilot gets them.
+    writeFileSync(join(folder, "ternleaf.rules.md"), "Plain English.\n```ternleaf\nmax-pages: 2\nmax-sentence-words: 4\nrequire-heading: Decision\navoid: utilize => use\nmax-pages: many\n```\n");
+    const fixed = workspace.rules().checks;
+    assert.deepEqual(fixed, [{ kind: "max-pages", limit: 2 }, { kind: "max-sentence-words", limit: 4 },
+      { kind: "require-heading", heading: "Decision" }, { kind: "avoid", term: "utilize", better: "use" }]);
+    assert.deepEqual(runChecks(fixed, { pages: 3, words: 12, headings: ["The decision we ask for"],
+      paragraphs: ["We utilize the roof. Utilized is fine. This sentence is far too long here."] }).map(item => [item.ok, item.text]), [
+      [false, "Length: 3 pages. The limit is 2."],
+      [false, '1 sentence longer than 4 words. The longest has 7: "This sentence is far too long here."'],
+      [true, 'The heading "Decision" is there.'], [false, '"utilize" occurs once. Use "use".']]);
+    await post("pulse", { lease, live: { revision: 0, pages: 3, words: 12, selection, failing: ["Length: 3 pages. The limit is 2."] } });
+    assert.deepEqual(action("ternleaf_status")(host, {}).failingChecks, ["Length: 3 pages. The limit is 2."]);
+    assert.match(promptContext(new Map([["main", host]]), { briefed: true }), /1 house rule check fail/);
+    assert.equal((await post("history", { lease })).rules.checks.length, 4);
+    host.news();
+
+    // The change record: what was accepted, for a reader who was not there.
+    const record = await action("ternleaf_export")(host, { format: "changes" });
+    assert.deepEqual([record.path, record.acceptedChanges], ["exports/Brief-changes-r0.md", 0]);
+    assert.match(changeRecord({ document: "Brief.docx", revision: 3, when: new Date("2026-11-14T10:00:00Z"), changes: [
+      { revision: 2, prompt: "Shorten.", before: "The roof is old.", replacement: "The roof\nis worn.", rationale: "More exact.", note: "Agreed with Ann.", origin: "chat" }] }),
+      /^# Change record: Brief\.docx\n\nRevision 3, written 2026-11-14\. 1 accepted change\.[\s\S]*## 1\. Revision 2\n\n- Request \(from the chat\): Shorten\.\n- Copilot's reason: More exact\.\n- Author's note: Agreed with Ann\.\n\nBefore:\n\n> The roof is old\.\n\nAfter:\n\n> The roof is worn\.\n$/);
+
     // Other documents of the project.
     assert.deepEqual(action("ternleaf_documents")(host, {}).documents.map(item => item.path), ["docs/Brief.docx", "examples/welcome-to-ternleaf.docx"]);
     assert.deepEqual(action("ternleaf_history")(host, {}), { document: "Brief.docx", revision: 0, acceptedChanges: 0, changes: [] });
@@ -260,7 +321,7 @@ test("Copilot works on the document from the chat, and the author stays in contr
       }
       assert.match(promptContext(new Map([["main", closed]]), { briefed: true }), /only on requests that the author sends from the canvas/);
     } finally { await closed.close(); }
-    assert.deepEqual(seen.filter(Boolean), []);
+    assert.deepEqual(seen.filter(Boolean), ["Copilot read the selected text."]);
   } finally {
     await host.close();
     assert(existsSync(join(folder, ".ternleaf")));

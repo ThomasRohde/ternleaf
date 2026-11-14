@@ -51,7 +51,7 @@ test("the author can choose an alternative or edit a proposal before acceptance"
     db.reviseReview(lease, draft.id, "keep");
     assert.equal(db.reviewState(lease).draft.replacement, "keep");
     assert.throws(() => db.reviseReview(lease, draft.id, "KEEP"), /invalid-replacement/);
-    assert.throws(() => db.reviseReview(lease, draft.id, "two\nlines"), /invalid-replacement/);
+    assert.throws(() => db.reviseReview(lease, draft.id, "two\tcolumns"), /invalid-replacement/);
     const start = { node, offset: 0 };
     const forward = [{ DeleteText: { range: { start, end: { node, offset: 4 } } } }, { InsertText: { at: start, text: "keep" } }];
     const frame = { base: 0, revision: 1, forward, inverse: ["engine inverse"] };
@@ -173,4 +173,67 @@ test("each refusal has plain text for the author and an instruction for the agen
   assert.match(forAuthor("writer-active"), /another Ternleaf canvas/);
   assert.match(forAgent("invalid-replacement"), /ternleaf_decline/);
   assert.equal(forAuthor("unlisted-code"), "unlisted-code");
+});
+
+test("the store accepts only a frame that does exactly the reviewed change", async () => {
+  const { frameDoesChange, reviewChange } = await import("../packages/session/review-change.mjs");
+  const node = "a".repeat(32);
+  const fresh = "b".repeat(32);
+  const at = offset => ({ node, offset });
+  const del = (start, end) => ({ DeleteText: { range: { start: at(start), end: at(end) } } });
+  const ins = (offset, text, where = node) => ({ InsertText: { at: { node: where, offset }, text } });
+  const format = (start, end) => ({ FormatText: { range: { start: at(start), end: at(end) }, delta: { bold: true } } });
+
+  // Inside text of one formatting: a deletion and an insertion.
+  const narrow = reviewChange({ before: "bold middle", replacement: "bold kernel", start: 12 });
+  assert.deepEqual(narrow, { start: 17, end: 23, removed: "middle", inserted: "kernel" });
+  assert(frameDoesChange([del(17, 23), ins(17, "kernel")], node, narrow));
+  assert(!frameDoesChange([del(17, 23), ins(17, "kernal")], node, narrow));
+  assert(!frameDoesChange([del(16, 23), ins(17, "kernel")], node, narrow));
+  assert(!frameDoesChange([ins(17, "kernel")], node, narrow));
+  assert(!frameDoesChange([del(17, 23), ins(17, "kernel"), del(0, 5)], node, narrow));
+
+  // A wide change: the new text gets formatting, and only the new text.
+  assert(frameDoesChange([del(17, 23), ins(17, "kernel"), format(17, 23)], node, narrow));
+  assert(!frameDoesChange([del(17, 23), ins(17, "kernel"), format(0, 23)], node, narrow));
+  assert(!frameDoesChange([del(17, 23), ins(17, "kernel"), { SetParagraphStyle: { node } }], node, narrow));
+
+  // New paragraphs: text, a split, and text in the new paragraph.
+  const wide = reviewChange({ before: "stays", replacement: "one\ntwo", start: 6 });
+  const split = { SplitParagraph: { at: at(9), new_id: fresh, properties: null } };
+  assert(frameDoesChange([del(6, 11), ins(6, "one"), split, ins(0, "two", fresh)], node, wide));
+  assert(!frameDoesChange([del(6, 11), ins(6, "one"), ins(9, "two")], node, wide));
+  assert(!frameDoesChange([del(6, 11), ins(6, "one"), split, ins(0, "two and more", fresh)], node, wide));
+  assert(!frameDoesChange([del(6, 11), ins(6, "one"), { SplitParagraph: { at: at(8), new_id: fresh } }, ins(0, "two", fresh)], node, wide));
+
+  // Suggesting mode: one tracked deletion and one tracked insertion.
+  const run = text => ({ type: "run", text });
+  const revision = (kind, text) => ({ type: "revision", kind, inlines: [run(text)] });
+  const tracked = inlines => [{ UpdateReviewState: { paragraphs: [{ node, inlines }], comments: null } }];
+  assert(frameDoesChange(tracked([run("bold "), revision("insertion", "kernel"), revision("deletion", "middle")]), node, narrow));
+  assert(!frameDoesChange(tracked([run("bold "), revision("insertion", "kernal"), revision("deletion", "middle")]), node, narrow));
+  assert(!frameDoesChange(tracked([run("bold kernel")]), node, narrow));
+  assert(!frameDoesChange([{ UpdateReviewState: { paragraphs: [{ node: fresh, inlines: [revision("insertion", "kernel"), revision("deletion", "middle")] }], comments: null } }], node, narrow));
+  assert(!frameDoesChange(tracked([revision("insertion", "one\ntwo"), revision("deletion", "stays")]), node, wide));
+});
+
+test("the changes of a copy from Word become suggestions with a find text that occurs once", async () => {
+  const { exportedRevision, suggestionsFromComparison } = await import("../apps/editor/merge.mjs");
+  assert.deepEqual(["brief-r12.docx", "Brief-r0 (1).docx", "brief.docx", "r3.docx"].map(exportedRevision), [12, 0, null, null]);
+  const text = { a: "The plan is the plan that we made. Größe matters.", b: "One two three.", c: "x" };
+  const at = (node, start, end, rightText) => ({ family: "text", left: { node, start, end }, ...(rightText === undefined ? {} : { rightText }) });
+  const { suggestions, other } = suggestionsFromComparison([
+    at("a", 12, 15, "our"),                      // The second "the": a window of one word is not enough.
+    at("a", 35, 42, "Size"),                     // "Größe": the offsets are bytes.
+    at("b", 4, 8),                               // A deletion of "two ".
+    at("c", 0, 0, "y"),                          // An insertion with no text around it to find.
+    at("gone", 0, 3, "abc"),
+    { family: "block", kind: "insertion", right: { node: "n" }, rightText: "A new paragraph." },
+    { family: "metadata", kind: "property" },
+  ], node => text[node] ?? null);
+  assert.deepEqual(suggestions, [
+    { node: "a", find: "the plan that we made. Größe", replacement: "our plan that we made. Size" },
+    { node: "b", find: "two ", replacement: "" }, { node: "c", find: "x", replacement: "yx" }]);
+  assert.equal(other, 2);
+  for (const { node, find } of suggestions) assert.equal(text[node].split(find).length, 2);
 });

@@ -286,10 +286,21 @@ try {
       [1, true, true], format + ": " + content.subarray(0, 40).toString("latin1"));
     if (format === "markdown") assert(content.toString().includes("Alpha KEEP omegaZ"));
   }
+  // The engine lays out a copy with the changes and reports the real length.
+  const measured = await act("ternleaf_measure")(host, { revision: text.revision, suggestions: [
+    { paragraph: line.paragraph, find: "Alpha KEEP ", replacement: "" }, { paragraph: line.paragraph, find: "absent", replacement: "x" }] });
+  assert.deepEqual([measured.now.pages >= 1, measured.after.pages <= measured.now.pages, measured.now.words - measured.after.words, measured.applied,
+    measured.cannotApply], [true, true, 2, 1, [{ suggestion: 2, reason: "the find text is not in that paragraph" }]]);
+  assert.equal((await state(page)).head, 1);
   const sent = act("ternleaf_suggest")(host, { instructions: "Use HOLD, not KEEP.", revision: text.revision, suggestions: [
+    { paragraph: line.paragraph, find: "Alpha", remark: "Say what Alpha is." },
     { paragraph: line.paragraph, find: "KEEP", replacement: "HOLD", rationale: "The author asked for HOLD." },
     { paragraph: line.paragraph, find: "absent", replacement: "x" }] });
-  assert.deepEqual([sent.suggested, sent.refused.length], [1, 1]);
+  assert.deepEqual([sent.suggested, sent.refused.length], [2, 1]);
+  await page.getByText("1 suggestion and 1 remark to review").waitFor();
+  const remark = page.locator('#ternleaf-panel [data-part=queue-list] li[data-kind=remark]');
+  await remark.getByText("Say what Alpha is.").waitFor();
+  await remark.getByRole("button", { name: "Done" }).click();
   await page.getByText("1 suggestion to review").waitFor();
   await page.locator('#ternleaf-panel [data-part=queue-prompt][data-origin=chat]').filter({ hasText: "Use HOLD, not KEEP." }).waitFor();
   await page.locator("#ternleaf-panel [data-part=queue-list]").getByRole("button", { name: "Review" }).click();
@@ -318,6 +329,137 @@ try {
     [[2, "chat", "Use HOLD, not KEEP.", "HOLD"], [3, "chat", "End with Y.", "Alpha HOLD omegaY"]]);
   assert.equal(past.changes.at(-1).before, "Alpha HOLD omegaZ");
   assert.equal(typeof proposed.requestId, "string");
+  // The change record, from Copilot and from the History tab.
+  const record = await act("ternleaf_export")(host, { format: "changes" });
+  const written = (await readFile(join(folder, record.path))).toString();
+  assert.match(written, /# Change record: First\.docx[\s\S]*2 accepted changes[\s\S]*Request \(from the chat\): End with Y\.[\s\S]*> Alpha HOLD omegaY/);
+  await page.locator("#ternleaf-panel").getByRole("tab", { name: /History/ }).click();
+  const [saved] = await Promise.all([page.waitForEvent("download"),
+    page.getByRole("button", { name: "Download the change record" }).click()]);
+  assert.equal(saved.suggestedFilename(), "First-changes-r3.md");
+
+  // Stage 2 of the plan, in a document with bold text inside a paragraph:
+  // checks without a model, a remark that becomes a Word comment, and a
+  // change across a formatting boundary with its warning.
+  await writeFile(join(folder, "ternleaf.rules.md"), "Write plainly.\n```ternleaf\nmax-words: 5\navoid: sentence => line\nmax-pages: 3\n```\n");
+  await copyFile(new URL("./fixtures/mixed.docx", import.meta.url), join(folder, "docs", "Mixed.docx"));
+  host.openDocument("docs/Mixed.docx");
+  await shows(page, "Mixed.docx");
+  await until(() => host.status().canvas.ready && host.status().failingChecks?.length === 2, "the failing checks reach the host");
+  await page.getByText("House rules: 2 of 3 checks fail").waitFor();
+  await page.getByText('"sentence" occurs once. Use "line".').waitFor();
+  const mixed = await act("ternleaf_read")(host, {});
+  assert.deepEqual([mixed.houseRules.path, mixed.failingChecks.length], ["ternleaf.rules.md", 2]);
+  const bold = mixed.paragraphs.find(item => item.text === "Plain start bold middle plain end of the sentence.");
+  const third = mixed.paragraphs.find(item => item.text.startsWith("Third paragraph"));
+  const second = mixed.paragraphs.find(item => item.text === "Second paragraph stays here.");
+  const runsOf = text => page.evaluate(wanted => {
+    const doc = window.ternleafEditor.doc;
+    const [node] = JSON.parse(doc.searchableText()).find(([, value]) => value === wanted);
+    return doc.copyRichRuns(node, 0, node, doc.paragraphLength(node));
+  }, text);
+  const acceptNext = async head => {
+    await page.getByRole("button", { name: "Accept change" }).click();
+    await until(async () => (await state(page)).head === head, "the accepted change is revision " + head);
+  };
+  act("ternleaf_suggest")(host, { instructions: "Review against the house rules.", revision: mixed.revision, suggestions: [
+    { paragraph: bold.paragraph, find: "bold middle", replacement: "strong centre", rationale: "A whole bold phrase." },
+    { paragraph: second.paragraph, find: "stays here.", replacement: "stays.\nA new paragraph follows.", rationale: "A new paragraph." },
+    { paragraph: third.paragraph, find: "Third paragraph", remark: "Say which paragraph." }] });
+  await page.getByText("2 suggestions and 1 remark to review").waitFor();
+  await page.locator("#ternleaf-panel li[data-kind=remark]").getByRole("button", { name: "Add as comment" }).click();
+  await page.getByText("The remark is now a comment in the document.").waitFor();
+  await until(async () => (await state(page)).head === 1, "the comment is revision 1");
+  assert.equal((await act("ternleaf_read")(host, {})).comments, 1);
+  // A change over a whole bold phrase keeps the bold, with no warning.
+  await page.locator("#ternleaf-panel [data-part=queue-list]").getByRole("button", { name: "Review" }).first().click();
+  await page.locator("#ternleaf-panel [data-part=rationale-text]").filter({ hasText: "A whole bold phrase." }).waitFor();
+  assert(await page.locator("#ternleaf-panel [data-part=mixed]").isHidden());
+  await acceptNext(2);
+  assert.deepEqual(JSON.parse(await runsOf("Plain start strong centre plain end of the sentence.")),
+    [{ text: "Plain start " }, { text: "strong centre", bold: true }, { text: " plain end of the sentence." }]);
+  // A line break in the replacement is a new paragraph, in one revision.
+  await page.locator("#ternleaf-panel [data-part=rationale-text]").filter({ hasText: "A new paragraph." }).waitFor();
+  await acceptNext(3);
+  assert(await hasText(page, "Second paragraph stays."));
+  assert(await hasText(page, "A new paragraph follows."));
+  // In Suggesting mode an accepted proposal is a Word tracked change.
+  await page.evaluate(async () => {
+    const { doc, refresh } = window.ternleafEditor;
+    const [node] = JSON.parse(doc.searchableText())[0];
+    await refresh(doc.setTrackRevisions(true, node, 0));
+  });
+  await until(() => host.status().canvas.suggestingMode === true && host.status().document.revision === 4, "Suggesting mode reaches the host");
+  let now = await act("ternleaf_read")(host, {});
+  act("ternleaf_suggest")(host, { instructions: "Call it a note.", revision: now.revision, suggestions: [
+    { paragraph: now.paragraphs.find(item => item.text.startsWith("Third paragraph")).paragraph, find: "for a comment", replacement: "for a note", rationale: "Tracked." }] });
+  await page.locator("#ternleaf-panel [data-part=queue-list]").getByRole("button", { name: "Review" }).click();
+  await page.locator("#ternleaf-panel [data-part=tracked]").filter({ hasText: "tracked change" }).waitFor();
+  await acceptNext(5);
+  const trackedChanges = JSON.parse(await page.evaluate(() => window.ternleafEditor.doc.listRevisions()));
+  assert.deepEqual(trackedChanges.map(item => [item.kind, item.text]).sort(), [["deletion", "comment"], ["insertion", "note"]]);
+  await page.evaluate(async () => {
+    const { doc, refresh } = window.ternleafEditor;
+    const [node] = JSON.parse(doc.searchableText())[0];
+    await refresh(doc.setTrackRevisions(false, node, 0));
+  });
+  await until(() => host.status().canvas.suggestingMode === false && host.status().document.revision === 6, "Editing mode reaches the host");
+  // A change across bold and plain text is applied, with a warning.
+  now = await act("ternleaf_read")(host, {});
+  act("ternleaf_suggest")(host, { instructions: "Shorten.", revision: now.revision, suggestions: [
+    { paragraph: now.paragraphs.find(item => item.text.startsWith("Plain start")).paragraph, find: "start strong centre plain", replacement: "opening", rationale: "Shorter." }] });
+  await page.locator("#ternleaf-panel [data-part=queue-list]").getByRole("button", { name: "Review" }).click();
+  await page.locator("#ternleaf-panel [data-part=mixed]").filter({ hasText: "formatting of the first replaced word" }).waitFor();
+  await acceptNext(7);
+  assert(await hasText(page, "Plain opening end of the sentence."));
+  const word = await act("ternleaf_export")(host, { format: "docx" });
+
+  // A copy comes back from Word. It was exported at revision 0, and the
+  // document changed here after that. Only the changes from Word come to the
+  // review, and the change that was made here stays.
+  await copyFile(new URL("./fixtures/mixed.docx", import.meta.url), join(folder, "docs", "Back.docx"));
+  host.openDocument("docs/Back.docx");
+  await shows(page, "Back.docx");
+  await until(() => host.status().canvas.ready, "the canvas shows Back.docx");
+  const fromWord = Buffer.from(await page.evaluate(async () => {
+    const wasm = await import("/pkg/casual_doc_wasm.js");
+    const { doc, refresh } = window.ternleafEditor;
+    const format = "org.openxmlformats.wordprocessingml.document";
+    const exported = doc.exportAs(format, "exact_if_unchanged");
+    const copy = wasm.open(exported.bytes);
+    exported.free();
+    const paragraphs = JSON.parse(copy.searchableText());
+    copy.replaceSelection(paragraphs[1][0], 0, paragraphs[1][0], 6, "Middle").free();
+    copy.replaceSelection(paragraphs[0][0], 0, paragraphs[0][0], 6, "").free();
+    const edited = copy.exportAs(format, "preserve_when_safe");
+    const bytes = Array.from(edited.bytes);
+    edited.free();
+    copy.free();
+    // Meanwhile the author changes the third paragraph here.
+    const [third] = JSON.parse(doc.searchableText())[2];
+    await refresh(doc.replaceSelection(third, 0, third, 5, "Final"));
+    return bytes;
+  }));
+  await writeFile(join(out, "Back-r0.docx"), fromWord);
+  await until(async () => (await state(page)).head === 1, "the author's edit is revision 1");
+  await page.locator("#ternleaf-panel [data-action=export-menu]").click();
+  const [wordFile] = await Promise.all([page.waitForEvent("filechooser"),
+    page.getByRole("menuitem", { name: "Merge a copy from Word…" }).click()]);
+  await wordFile.setFiles(join(out, "Back-r0.docx"));
+  await page.getByText("2 suggestions to review").waitFor();
+  await page.locator("#ternleaf-panel [data-part=queue-prompt][data-origin=word]")
+    .filter({ hasText: "Changes from Back-r0.docx, made in Word after revision 0." }).waitFor();
+  await page.locator("#ternleaf-panel [data-part=queue-list]").getByRole("button", { name: "Review" }).first().click();
+  await page.locator("#ternleaf-panel [data-part=asked][data-origin=word]").waitFor();
+  await acceptNext(2);
+  await page.locator("#ternleaf-panel [data-part=rationale-text]").filter({ hasText: "Changed in Word." }).waitFor();
+  await acceptNext(3);
+  for (const expected of ["start bold middle plain end of the sentence.", "Middle paragraph stays here.", "Final paragraph for a comment."]) {
+    assert(await hasText(page, expected), expected);
+  }
+  assert(!(await hasText(page, "Plain start")));
+  assert.equal(act("ternleaf_history")(host, {}).changes.at(-1).from, "word");
+  assert.equal((await readFile(join(folder, word.path))).subarray(0, 2).toString(), "PK");
   await close(page);
 
   console.log(JSON.stringify({ synchronousAdmissionMs: admission }));

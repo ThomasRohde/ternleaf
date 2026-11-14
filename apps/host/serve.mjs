@@ -4,6 +4,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, realpathSync, re
 import { basename, dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ProjectStore, Rejected } from "../../packages/session/store.mjs";
+import { changeRecord } from "../../packages/session/record.mjs";
 import { ProjectError } from "./project.mjs";
 
 const mime = { ".mjs": "text/javascript", ".js": "text/javascript", ".html": "text/html",
@@ -109,6 +110,9 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
     for (const [id, job] of jobs) { clearTimeout(job.timer); job.reject(new Rejected(code)); jobs.delete(id); }
   }
 
+  // The house rules as Copilot reads them: the file and its text.
+  const readable = found => found ? { path: found.path, text: found.text } : null;
+  const rulesForEditor = () => { const found = workspace?.rules(); return found ? { path: found.path, checks: found.checks } : null; };
   const validParagraphs = list => Array.isArray(list) ? list.filter(item => Array.isArray(item)
     && /^[a-f0-9]{32}$/.test(item[0]) && typeof item[1] === "string" && item[1].trim()) : [];
 
@@ -122,9 +126,12 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
       const reason = !paragraph ? "unknown paragraph number"
         : typeof item.find !== "string" || !paragraph[1].includes(item.find) ? "the find text is not in that paragraph"
         : paragraph[1].indexOf(item.find) !== paragraph[1].lastIndexOf(item.find) ? "the find text occurs more than once; give a longer find text"
+        : typeof item.remark === "string" ? (item.replacement !== undefined ? "give a replacement or a remark, not both" : null)
         : item.replacement === item.find ? "the replacement is the same as the find text" : null;
       if (reason) refused.push({ suggestion: index + 1, reason });
+      else if (typeof item.remark === "string") kept.push({ node: paragraph[0], find: item.find, remark: item.remark });
       else kept.push({ node: paragraph[0], find: item.find, replacement: item.replacement, rationale: item.rationale });
+      if (!reason && item.given) kept.at(-1).given = item.given;
     }
     if (!kept.length) {
       throw new Rejected("invalid-suggestions", refused.length
@@ -272,7 +279,7 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
             lease = claimed.lease;
             return json(res, 200, { ...claimed, name, epoch, workspace: Boolean(workspace),
               fontHash, fontCount: fontBytes.length,
-              captureWordComparison, reviews: reviews(lease), accepted: store.acceptedReviews(lease),
+              captureWordComparison, reviews: reviews(lease), accepted: store.acceptedReviews(lease), rules: rulesForEditor(),
               suggestions: suggestions(lease) });
           }
           case "/api/pulse": {
@@ -284,12 +291,14 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
             live = { at: Date.now(), revision: Number(told.revision) || 0,
               pages: Number(told.pages) || null, words: Number(told.words) || null,
               suggesting: told.suggesting === true,
+              // The house rule checks that fail now, as the editor found them.
+              failing: (Array.isArray(told.failing) ? told.failing : []).slice(0, 12).map(line => String(line).slice(0, 300)),
               selection: picked && /^[a-f0-9]{32}$/.test(picked.node) && Number.isSafeInteger(picked.start)
                 && Number.isSafeInteger(picked.end) && typeof picked.before === "string" && picked.before.length <= 4000
                 && Number.isSafeInteger(picked.revision)
                 ? { node: picked.node, start: picked.start, end: picked.end, before: picked.before, revision: picked.revision }
                 : null };
-            return json(res, 200, { stamp, notices: notices.splice(0),
+            return json(res, 200, { stamp, notices: notices.splice(0), rules: workspace?.rules()?.stamp ?? null,
               jobs: [...jobs].map(([id, job]) => ({ id, kind: job.kind, ...job.params })) });
           }
           case "/api/job": {
@@ -347,6 +356,25 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
           case "/api/adopt":
             store.adoptSuggestion(data.lease, session, fontHash, data.id, data.scope);
             return json(res, 200, reviews(data.lease));
+          case "/api/merge": {
+            // Changes that the author made in Word, found by the editor in a
+            // copy that came back. They go to the same review as Copilot's
+            // suggestions, and nothing else decides about them.
+            store.checkLease(data.lease);
+            const waiting = store.batchState(data.lease);
+            if (store.reviewState(data.lease).draft?.replacement != null
+              || waiting.suggestions.some(item => item.state === "open") || waiting.batch?.state === "waiting") {
+              throw new Rejected("review-in-progress");
+            }
+            const list = (Array.isArray(data.changes) ? data.changes : []).slice(0, 60)
+              .map(({ node, find, replacement }) => ({ node, find, replacement, rationale: "Changed in Word." }));
+            const batch = store.createBatch(data.lease, session, { revision: data.revision, origin: "word",
+              prompt: String(data.summary ?? "").slice(0, 2000) });
+            try { store.submitSuggestions(data.lease, session, batch.id, list); }
+            catch (error) { store.discardBatch(data.lease); throw error; }
+            shared = undefined;
+            return json(res, 200, suggestions(data.lease));
+          }
           case "/api/discard-batch": {
             const waiting = store.batchState(data.lease).suggestions.filter(item => item.state === "open").length;
             if (waiting) note({ decision: "dismissed", suggestions: waiting });
@@ -354,7 +382,8 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
             shared = undefined;
             return json(res, 200, suggestions(data.lease));
           }
-          case "/api/history": return json(res, 200, { accepted: store.acceptedReviews(data.lease) });
+          case "/api/history": return json(res, 200, { accepted: store.acceptedReviews(data.lease),
+            rules: rulesForEditor() });
           case "/api/review-note":
             store.saveNote(data.lease, data.id, data.note);
             return json(res, 200, {});
@@ -375,7 +404,7 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
         }
       }
       if (req.method !== "GET") return json(res, 405, { error: "method" });
-      if ((path === "/ternleaf/review-change.mjs" || path === "/ternleaf/messages.mjs")
+      if ((path === "/ternleaf/review-change.mjs" || path === "/ternleaf/messages.mjs" || path === "/ternleaf/record.mjs")
         && staticFile(res, resolve(sessionAssets), path.slice("/ternleaf".length), true)) return;
       if (path.startsWith("/ternleaf/") && staticFile(res, ui, path.slice("/ternleaf".length), true)) return;
       if (staticFile(res, root, path === "/" ? "/editor.html" : path)) return;
@@ -413,7 +442,7 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
   function suggestions(current) {
     const state = store.batchState(current);
     return { ...state, unanswered: Boolean(state.batch?.state === "waiting" && state.batch.id === unanswered),
-      origin: state.batch?.origin === "chat" ? "chat" : "canvas" };
+      origin: state.batch?.origin ?? "canvas" };
   }
   return {
     get name() { return name; },
@@ -488,7 +517,8 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
         canvas: ready ? { ready: true, pages: live.pages, words: live.words, suggestingMode: live.suggesting,
           selection: chat && live.selection && live.selection.revision === head ? { text: live.selection.before } : null }
           : { ready: false },
-        request, review, chatAccess: chat,
+        request, review, chatAccess: chat, houseRules: workspace?.rules()?.path ?? null,
+        ...(ready && live.failing.length ? { failingChecks: live.failing } : {}),
       };
     },
     documents() {
@@ -520,7 +550,38 @@ export async function startHost({ source, state, engine, font, fonts = font ? [f
         ...(last < paragraphs.length ? { next: last + 1 } : {}),
         pages: Number(result.pages) || null, words: Number(result.words) || null,
         comments: Number(result.comments) || 0, trackedChanges: Number(result.trackedChanges) || 0,
-        selection: live?.selection && live.selection.revision === revision ? { text: live.selection.before } : null };
+        selection: live?.selection && live.selection.revision === revision ? { text: live.selection.before } : null,
+        houseRules: readable(workspace?.rules()),
+        ...(live?.failing.length ? { failingChecks: live.failing } : {}) };
+    },
+    houseRules() { return readable(workspace?.rules()); },
+    // What the document would be if the author accepted these changes: the
+    // engine lays out a copy and counts the pages. Nothing is saved, and the
+    // author sees nothing.
+    async measure({ revision, suggestions: list }) {
+      if (!snapshot || snapshot.revision !== revision || revision !== Number(store.project().head)) {
+        throw new Rejected(chat ? "stale-document" : "chat-access-off");
+      }
+      const changes = (Array.isArray(list) ? list : []).map((item, index) => ({ ...item, given: index + 1 }))
+        .filter(item => typeof item.remark !== "string");
+      const { kept, refused } = sortSuggestions(snapshot.paragraphs, changes);
+      const result = await editorJob("measure", { changes: kept.map(({ node, find, replacement }) => ({ node, find, replacement })) }, 40_000);
+      const blocked = (Array.isArray(result.blocked) ? result.blocked : [])
+        .map(({ index, reason }) => ({ suggestion: kept[index]?.given, reason: String(reason) }));
+      return { revision, now: { pages: Number(result.pagesBefore), words: Number(result.wordsBefore) },
+        after: { pages: Number(result.pagesAfter), words: Number(result.wordsAfter) },
+        applied: kept.length - blocked.length, cannotApply: [...refused, ...blocked] };
+    },
+    // The accepted changes as a Markdown file in the exports folder.
+    exportRecord() {
+      if (!chat) throw new Rejected("chat-access-off");
+      if (!lease) throw new Rejected("canvas-not-ready");
+      if (!workspace) throw new Rejected("single-document");
+      const revision = Number(store.project().head);
+      const changes = store.acceptedReviews(lease);
+      const bytes = new TextEncoder().encode(changeRecord({ document: name, revision, changes }));
+      const path = workspace.exportFile({ name: `${name.replace(/\.docx$/i, "")}-changes-r${revision}`, extension: "md", bytes });
+      return { path, format: "changes", bytes: bytes.length, revision, acceptedChanges: changes.length };
     },
     // A proposal for the passage that the author has selected now.
     proposeFromChat({ instructions, text, replacement, rationale, alternatives }) {

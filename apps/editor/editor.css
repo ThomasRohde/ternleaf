@@ -317,6 +317,8 @@
 .tl-asked { font-weight: 500; }
 .tl-asked::before { content: "You asked: "; color: var(--muted); font-weight: 400; }
 .tl-asked[data-origin="chat"]::before { content: "From the chat: "; }
+.tl-asked[data-origin="word"]::before { content: "From Word: "; }
+.tl-menu-rule { border-top: 1px solid var(--line); }
 .tl-progress { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); }
 .tl-pulse {
   flex: none;
@@ -422,6 +424,16 @@
 .tl-queue li:is([data-state="skipped"], [data-state="accepted"], [data-state="blocked"]) { border-left-color: var(--line-strong); background: var(--surface-alt); }
 .tl-queue li:is([data-state="skipped"], [data-state="accepted"]) .tl-slip { opacity: 0.6; }
 .tl-done { color: var(--tl-brand); font-weight: 600; }
+.tl-queue li[data-kind="remark"] { border-left-color: var(--tl-brand-light); }
+.tl-queue li[data-kind="remark"] .tl-slip { font-style: italic; }
+.tl-remark { font-size: var(--fs-sm, 0.8125rem); line-height: 1.45; }
+.tl-checks { margin: 0 0 0.75rem; padding: 0.5rem 0.65rem; border: 1px solid var(--line); border-left: 3px solid var(--tl-brand-light); border-radius: 6px; background: var(--surface-alt); }
+.tl-checks[data-state="failing"] { border-left-color: var(--warning); }
+.tl-checks h3 { margin: 0; font-size: var(--fs-sm, 0.8125rem); font-weight: 600; }
+.tl-checks ul { margin: 0.35rem 0 0; padding-left: 1.1rem; font-size: var(--fs-sm, 0.8125rem); line-height: 1.45; }
+.tl-checks ul:empty { display: none; }
+.tl-checks .tl-help { margin: 0.3rem 0 0; }
+.tl-caution { margin: 0.5rem 0 0; padding: 0.4rem 0.6rem; border-left: 3px solid var(--warning); background: var(--surface-alt); font-size: var(--fs-sm, 0.8125rem); line-height: 1.45; }
 .tl-blocked { color: var(--warning); font-size: var(--fs-sm, 0.75rem); }
 .tl-step { color: var(--tl-brand); font-weight: 600; }
 .tl-slip-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }

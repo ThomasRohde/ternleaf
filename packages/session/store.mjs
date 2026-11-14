@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { reviewChange } from "./review-change.mjs";
+import { frameDoesChange, reviewChange } from "./review-change.mjs";
 
 export class Rejected extends Error {
   // `detail` is one plain sentence for the reader of the refusal, for example
@@ -22,7 +22,7 @@ function requireThat(condition, code) {
 }
 
 const validReplacement = (text, before) => typeof text === "string" && text.length <= 4000
-  && text !== before && !/[\r\n\t\uFFFC]/.test(text);
+  && text !== before && !/[\r\t\uFFFC]/.test(text) && text.split("\n").length <= 31;
 
 function normalizeMetadata(value) {
   if (value === null) return null;
@@ -72,6 +72,11 @@ export class ProjectStore {
     }
     if (!this.db.prepare("PRAGMA table_info(batches)").all().some(column => column.name === "origin")) {
       this.db.exec("ALTER TABLE batches ADD COLUMN origin TEXT");
+    }
+    // A suggestion of the kind "remark" points at text and says something
+    // about it. It has no replacement.
+    if (!this.db.prepare("PRAGMA table_info(suggestions)").all().some(column => column.name === "kind")) {
+      this.db.exec("ALTER TABLE suggestions ADD COLUMN kind TEXT");
     }
   }
 
@@ -265,7 +270,7 @@ export class ProjectStore {
       this.db.exec("DELETE FROM suggestions; DELETE FROM batches");
       const id = randomUUID();
       this.db.prepare("INSERT INTO batches (id, session, fence, revision, prompt, state, reason, created, origin) VALUES (?, ?, ?, ?, ?, 'waiting', NULL, ?, ?)")
-        .run(id, session, lease.fence, revision, prompt, this.now(), origin === "chat" ? "chat" : null);
+        .run(id, session, lease.fence, revision, prompt, this.now(), origin === "chat" || origin === "word" ? origin : null);
       return { id };
     });
   }
@@ -286,12 +291,15 @@ export class ProjectStore {
       requireThat(Array.isArray(list) && list.length > 0 && list.length <= 60 && list.every(item =>
         item && typeof item.node === "string" && /^[a-f0-9]{32}$/.test(item.node)
         && typeof item.find === "string" && item.find.length > 0 && !/[\r\n\t\uFFFC]/.test(item.find)
-        && validReplacement(item.replacement, item.find)
+        && (typeof item.remark === "string"
+          ? item.remark.trim().length > 0 && item.remark.length <= 600 && item.replacement === undefined
+          : validReplacement(item.replacement, item.find))
         && (item.rationale === undefined || (typeof item.rationale === "string" && item.rationale.length <= 600))),
       "invalid-suggestions");
-      const insert = this.db.prepare("INSERT INTO suggestions VALUES (?, ?, ?, ?, ?, ?, ?, 'open')");
-      list.forEach((item, position) => insert.run(randomUUID(), id, position, item.node, item.find,
-        item.replacement, item.rationale?.trim() || null));
+      const insert = this.db.prepare("INSERT INTO suggestions (id, batch, position, node, find, replacement, rationale, state, kind) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)");
+      list.forEach((item, position) => typeof item.remark === "string"
+        ? insert.run(randomUUID(), id, position, item.node, item.find, "", item.remark.trim(), "remark")
+        : insert.run(randomUUID(), id, position, item.node, item.find, item.replacement, item.rationale?.trim() || null, null));
       this.db.prepare("UPDATE batches SET state = 'answered' WHERE id = ?").run(id);
     });
   }
@@ -310,7 +318,7 @@ export class ProjectStore {
     const batch = this.db.prepare("SELECT id, fence, revision, prompt, state, reason, created, origin FROM batches").get();
     if (!batch) return { batch: null, suggestions: [] };
     return { batch, suggestions: this.db.prepare(
-      "SELECT id, node, find, replacement, rationale, state FROM suggestions WHERE batch = ? ORDER BY position").all(batch.id) };
+      "SELECT id, node, find, replacement, rationale, state, kind FROM suggestions WHERE batch = ? ORDER BY position").all(batch.id) };
   }
 
   discardBatch(lease) {
@@ -334,7 +342,7 @@ export class ProjectStore {
       const project = this.project();
       this.checkLease(lease, project);
       const suggestion = this.db.prepare("SELECT * FROM suggestions WHERE id = ?").get(id);
-      requireThat(suggestion && suggestion.state !== "accepted", "unknown-review");
+      requireThat(suggestion && suggestion.state !== "accepted" && suggestion.kind !== "remark", "unknown-review");
       requireThat(revision === project.head, "stale-revision");
       requireThat(node === suggestion.node && before === suggestion.find
         && Number.isSafeInteger(start) && start >= 0 && Number.isSafeInteger(end) && end > start
@@ -343,7 +351,7 @@ export class ProjectStore {
       const batch = this.db.prepare("SELECT prompt, origin FROM batches WHERE id = ?").get(suggestion.batch);
       const scope = { id: randomUUID(), session, fence: lease.fence, documentId: this.documentId(),
         sourceHash: project.source_hash, fontHash, revision, node, start, end, before,
-        ...(batch?.origin === "chat" ? { origin: "chat" } : {}) };
+        ...(batch?.origin ? { origin: batch.origin } : {}) };
       this.db.prepare("DELETE FROM reviews WHERE accepted IS NULL").run();
       this.db.prepare("INSERT INTO reviews (id, scope, replacement, prompt, note, accepted, created, rationale, suggestion) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)")
         .run(scope.id, encode(scope), suggestion.replacement, batch?.prompt ?? "", note, this.now(), suggestion.rationale, id);
@@ -406,12 +414,7 @@ export class ProjectStore {
           && draft.documentId === this.documentId() && draft.sourceHash === project.source_hash
           && draft.fontHash === fontHash && draft.revision === expected, "stale-review");
         const change = reviewChange(draft);
-        const start = { node: draft.node, offset: change.start };
-        const end = { node: draft.node, offset: change.end };
-        const forward = [];
-        if (change.removed) forward.push({ DeleteText: { range: { start, end } } });
-        if (change.inserted) forward.push({ InsertText: { at: start, text: change.inserted } });
-        requireThat(command.kind === "edit" && same(frame.forward, forward)
+        requireThat(command.kind === "edit" && frameDoesChange(frame.forward, draft.node, change)
           && editorial?.target === draft.node && editorial.note === draft.note, "review-frame-mismatch");
         this.db.prepare("UPDATE reviews SET accepted = ? WHERE id = ?").run(expected + 1, reviewId);
         if (draft.suggestion) {

@@ -39,6 +39,7 @@ export function promptContext(instances, state) {
     else line.push("The author has no text selected.");
     if (request) line.push(`A request from the canvas waits for your answer: call ternleaf_read with requestId ${request.requestId}.`);
     if (review) line.push("The author has a review open in the canvas.");
+    if (status.failingChecks?.length) line.push(`${count(status.failingChecks.length, "house rule check")} fail: ternleaf_status lists them.`);
     const decided = host.news().map(decision).filter(Boolean);
     if (decided.length) line.push(`Since your last turn the author ${decided.join("; ")}.`);
     line.push("For any work on this document use the canvas actions (invoke_canvas_action). ternleaf_guide explains them.");

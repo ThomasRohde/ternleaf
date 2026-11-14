@@ -2,6 +2,33 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
+// Rules with a fixed form are checked by Ternleaf itself, without a model.
+// They stand in the rules file in a fenced block with the name ternleaf:
+//   max-pages: 2
+//   max-words: 800
+//   max-sentence-words: 30
+//   require-heading: Recommendation
+//   avoid: utilize => use
+export function parseChecks(text) {
+  const block = /```ternleaf[^\n]*\n([\s\S]*?)```/.exec(text);
+  const checks = [];
+  for (const line of (block?.[1] ?? "").split("\n")) {
+    const match = /^\s*([a-z-]+)\s*:\s*(.+?)\s*$/.exec(line);
+    if (!match) continue;
+    const [, kind, value] = match;
+    const number = Number(value);
+    if (["max-pages", "max-words", "max-sentence-words"].includes(kind)) {
+      if (Number.isSafeInteger(number) && number > 0) checks.push({ kind, limit: number });
+    } else if (kind === "require-heading") checks.push({ kind, heading: value.slice(0, 120) });
+    else if (kind === "avoid") {
+      const [term, better] = value.split("=>").map(part => part.trim());
+      if (term) checks.push({ kind, term: term.slice(0, 80), ...(better ? { better: better.slice(0, 80) } : {}) });
+    }
+    if (checks.length >= 40) break;
+  }
+  return checks;
+}
+
 export class ProjectError extends Error {}
 
 const inside = (root, path) => path === root || path.startsWith(root + sep);
@@ -190,6 +217,24 @@ export function createWorkspace({ project, workingDirectory }) {
     throw new ProjectError("Too many documents have that name. Choose another name.");
   }
 
+  // The house rules of the project: what a document here must follow, in
+  // the team's own words. Copilot gets them with every read. The file is
+  // ternleaf.rules.md in the project folder, or the "rules" path of
+  // .ternleaf/canvas.json.
+  function rules() {
+    const named = config().rules;
+    for (const candidate of [named, "ternleaf.rules.md", ".github/ternleaf.rules.md"]) {
+      if (typeof candidate !== "string" || !candidate) continue;
+      try {
+        const file = realpathSync(resolve(home, candidate));
+        if (!roots.some(root => inside(root, file)) || !statSync(file).isFile()) continue;
+        const text = readFileSync(file, "utf8").trim();
+        if (text) return { path: key(file), text: text.slice(0, 20_000), checks: parseChecks(text), stamp: `${file}:${statSync(file).mtimeMs}` };
+      } catch { /* No rules file at this path. */ }
+    }
+    return null;
+  }
+
   // Write an export of a document into the exports folder of the project and
   // return its path. An export is a copy that can be made again, so a file
   // with the same name is replaced.
@@ -213,7 +258,7 @@ export function createWorkspace({ project, workingDirectory }) {
   // every canvas of the project, so the editor keeps one origin.
   const port = 42000 + (Number.parseInt(createHash("sha256").update(home).digest("hex").slice(0, 8), 16) % 16000);
 
-  return { resolve: resolveDocument, documents, remember, create, exportFile, key, project: home, welcome, port };
+  return { resolve: resolveDocument, documents, remember, create, exportFile, rules, key, project: home, welcome, port };
 }
 
 // The settings for one canvas. See createWorkspace.
