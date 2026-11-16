@@ -12,13 +12,14 @@ import { partsFolder, projectFolder, startProblem } from "./start-check.mjs";
 
 // The same file runs in the Ternleaf repository and in a repository where
 // scripts/install.mjs installed Ternleaf. The parts are found from this
-// folder, and the project is always the repository that holds
-// .github/extensions/ternleaf. The parts are imported only after the check,
+// folder. Repository installs use their repository as the project, and user
+// installs use the active Copilot session's working directory.
+// The parts are imported only after the check,
 // so a missing part or an old Node.js gives the author one sentence, and the
 // canvas does not simply stay absent.
 const here = dirname(fileURLToPath(import.meta.url));
 const root = partsFolder(here);
-const project = projectFolder(here);
+let project = projectFolder(here);
 let problem = await startProblem(root);
 let modules = [{ actions: [] }, {}, {}, {}, {}, {}, {}];
 if (!problem) {
@@ -93,6 +94,7 @@ const canvas = createCanvas({
         // The canvas is open already. A path asks it to show that document.
         if (input?.document) host.openDocument(input.document);
       } else {
+        project = projectFolder(here, context?.workingDirectory);
         const workspace = createWorkspace({ project, workingDirectory: context?.workingDirectory });
         const start = (settings, restart = false) => startHost({
           ...settings, workspace, restart, port: workspace.port,

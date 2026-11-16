@@ -1,6 +1,6 @@
 # Install and run Ternleaf
 
-Ternleaf is a repository extension for the GitHub Copilot desktop app. It contains a prebuilt engine, so you need no build tools. You can try it in the Ternleaf repository, or install it in your own repository.
+Ternleaf is a canvas extension for the GitHub Copilot desktop app. It contains a prebuilt engine, so you need no build tools. Install it for your user account to use it across projects, or install it in a repository to share it with that team.
 
 ## Requirements
 
@@ -50,6 +50,34 @@ The script never replaces a file that it did not write. If such a file is in the
 
 [`scripts/package-canvas.mjs`](../scripts/package-canvas.mjs) makes a release bundle. It has the layout of a clone, cut to what the install script needs, with the licence notices of the engine and its dependencies.
 
+## Install for your user account
+
+From a Ternleaf clone or an unpacked release, run:
+
+```powershell
+node scripts/install.mjs --user
+```
+
+This installs the extension, engine and notices in `~/.copilot/extensions/ternleaf/` and the personal skill in `~/.copilot/skills/ternleaf/SKILL.md`. On Windows, `~` is your user profile directory, for example `C:/Users/thoma`. If `COPILOT_HOME` is set, the installer uses that directory instead of `~/.copilot`. These are Copilot's personal extension and skill locations. [GitHub's configuration directory reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference)
+
+Open the folder containing your documents in Copilot Desktop, start a new session, and choose **+ → Canvas → Ternleaf**. The canvas uses that session's project folder for documents, `.ternleaf/` history, `exports/` and font configuration. You can open a different project in another session and use the same installation.
+
+```powershell
+node scripts/install.mjs --user --check
+node scripts/install.mjs --user
+node scripts/install.mjs --user --remove
+```
+
+The first command checks the installed files. Run the second from a newer release to update. The third removes the installed extension and skill. Existing project documents and histories remain in their project folders. Local changes to installed files receive the same checks as repository installs.
+
+If the app needs the SDK installed beside the personal extension, run this in PowerShell for the default configuration directory:
+
+```powershell
+npm ci --prefix "$env:USERPROFILE/.copilot/extensions/ternleaf"
+```
+
+Start a new session afterward. If you set `COPILOT_HOME`, use its `extensions/ternleaf` directory for that command. The user install leaves project `.gitignore` files alone. Add `.ternleaf/` and `exports/` to a project's ignore file if you keep that project in Git.
+
 ## If the canvas does not open
 
 - **The canvas is not in the list.** The app could not load the extension. Start a new session. If that does not help, run `npm ci --prefix .github/extensions/ternleaf` in the repository and start a new session. This installs the Copilot SDK next to the extension for an app version that does not supply it. The Copilot app normally supplies it, so the install script does not copy it.
@@ -94,7 +122,11 @@ Paths are relative to the project folder or absolute.
 
 ### Fonts
 
-Line breaks and page breaks depend on the exact fonts. The engine brings open fonts with it. Fonts with their own licence, such as Arial and Cambria on Windows, stay on your computer. To get the same pages as Word, list the font files that your documents use, with their regular, bold and italic faces:
+Line breaks and page breaks depend on the exact fonts. The engine brings open fonts with it. Fonts with their own licence, such as Arial and Cambria on Windows, stay on your computer.
+
+To use the same fonts across all projects, create `~/.copilot/ternleaf/fonts.json`. On Windows this is `%USERPROFILE%\.copilot\ternleaf\fonts.json`. If you set `COPILOT_HOME`, use its `ternleaf/fonts.json` instead. Both user and repository installations read this personal setting.
+
+List the font files that your documents use, with their regular, bold and italic faces:
 
 ```json
 {
@@ -107,7 +139,30 @@ Line breaks and page breaks depend on the exact fonts. The engine brings open fo
 }
 ```
 
-A change to the font list makes a saved proposal preview out of date. Ask again to get a new one.
+Absolute file paths work directly. Relative paths in the personal file are resolved from its `ternleaf` directory. The setting stays separate from the installed extension, so updates and removal preserve it.
+
+A project's `.ternleaf/canvas.json` can override the personal list with its own `fonts` array or its legacy `font` path. Set `"fonts": []` in a project to use only the bundled fonts. Remove both project font keys to inherit your personal fonts again.
+
+Close and reopen the canvas after changing the font configuration. A change to the loaded font list makes a saved proposal preview out of date. Ask again to get a new one.
+
+### Your Danske Bank font
+
+Use the font files installed or provided by your workplace. Add their absolute paths to the `fonts` array in your personal `~/.copilot/ternleaf/fonts.json` once to use them across projects. Include every face used in the Word document, such as regular, bold, italic and bold italic. Fonts installed for your account may be under `%LOCALAPPDATA%/Microsoft/Windows/Fonts`; system fonts are usually under `C:/Windows/Fonts`.
+
+For example, if your approved font files are in `C:/Work/Fonts`, the configuration would have this form. Replace these example filenames with the actual files:
+
+```json
+{
+  "fonts": [
+    "C:/Work/Fonts/YourBankFont-Regular.ttf",
+    "C:/Work/Fonts/YourBankFont-Bold.ttf",
+    "C:/Work/Fonts/YourBankFont-Italic.ttf",
+    "C:/Work/Fonts/YourBankFont-BoldItalic.ttf"
+  ]
+}
+```
+
+Remove a project's font override if it should inherit the personal list. These paths stay on the work computer and the font files stay outside the Ternleaf release. Load the same font family and faces used by Word. Qualification with Arial and Cambria does not establish matching pages with the bank font; compare an edited export in your work Word environment after configuring it. The bank font's exact files and its rendering have yet to be tested here.
 
 ### Settings
 

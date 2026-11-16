@@ -1,13 +1,15 @@
-// Install, update, check or remove Ternleaf in another repository.
+// Install, update, check or remove Ternleaf in a repository or user scope.
 //
 //   node scripts/install.mjs <repository>            install, or update
 //   node scripts/install.mjs --check <repository>    report, change nothing
 //   node scripts/install.mjs --remove <repository>   remove what was installed
+//   node scripts/install.mjs --user                  install for this user
 //   add --force to replace or remove installed files that were changed there
 //
 // Run it from a clone of Ternleaf or from an unpacked release. It has no
-// dependencies. Everything goes into .github/extensions/ternleaf, except the
-// skill, which Copilot finds only in .github/skills/ternleaf. A manifest in
+// dependencies. Repository installs use .github/extensions/ternleaf and
+// .github/skills/ternleaf. User installs use extensions/ and skills/ under
+// the Copilot configuration directory. A manifest in
 // the extension folder lists each installed file with its hash. With it, an
 // update replaces only files that Ternleaf wrote and that nobody changed,
 // and a removal removes only those files.
@@ -15,12 +17,19 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync,
   rmdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const extension = ".github/extensions/ternleaf";
 export const skill = ".github/skills/ternleaf/SKILL.md";
 export const manifestPath = `${extension}/ternleaf-install.json`;
 const gitignoreLines = [".ternleaf/", "exports/"];
+
+function installPaths(user) {
+  const folder = user ? "extensions/ternleaf" : extension;
+  return { extension: folder, skill: user ? "skills/ternleaf/SKILL.md" : skill,
+    manifestPath: folder + "/ternleaf-install.json" };
+}
 
 // What goes where: a path in the Ternleaf source (a clone or a release), and
 // its path in the repository. A release has the same layout as a clone, so
@@ -66,7 +75,7 @@ function walk(directory) {
 
 // Every file that the source gives, as { from, to } with paths from the
 // source and from the repository.
-export function sourceFiles(source) {
+export function sourceFiles(source, { user = false } = {}) {
   const files = [];
   for (const item of layout) {
     const from = join(source, item.from);
@@ -81,7 +90,10 @@ export function sourceFiles(source) {
       }
     } else files.push({ from: item.from, to: item.to });
   }
-  return files;
+  if (!user) return files;
+  const paths = installPaths(true);
+  return files.map(file => ({ ...file, to: file.to === skill ? paths.skill
+    : paths.extension + file.to.slice(extension.length) }));
 }
 
 function version(source) {
@@ -90,15 +102,15 @@ function version(source) {
 }
 
 // A short note in the extension folder for the team that finds it.
-const readme = release => `# Ternleaf
+const readme = (release, user = false) => `# Ternleaf
 
 This folder holds Ternleaf ${release}, a GitHub Copilot canvas for Word documents.
 scripts/install.mjs from Ternleaf wrote it. Do not edit the files here: the
 next update cannot replace a file that you changed.
 
-- Update: node scripts/install.mjs <this repository>, from a newer Ternleaf clone or release.
-- Check: node scripts/install.mjs --check <this repository>
-- Remove: node scripts/install.mjs --remove <this repository>
+- Update: node scripts/install.mjs ${user ? "--user" : "<this repository>"}, from a newer Ternleaf clone or release.
+- Check: node scripts/install.mjs --check ${user ? "--user" : "<this repository>"}
+- Remove: node scripts/install.mjs --remove ${user ? "--user" : "<this repository>"}
 
 Your documents stay where they are. Ternleaf keeps its project files in
 .ternleaf/ and writes exports into exports/ at the root of the repository.
@@ -113,7 +125,8 @@ function hashOf(file) {
   } catch { return null; }
 }
 
-function readManifest(target) {
+function readManifest(target, user = false) {
+  const { extension, manifestPath } = installPaths(user);
   const file = join(target, manifestPath);
   if (!existsSync(file)) return null;
   try {
@@ -139,7 +152,8 @@ function gitignorePlan(target) {
 }
 
 // Compare the source with the repository. Nothing is written here.
-export function plan(source, target, { force = false } = {}) {
+export function plan(source, target, { force = false, user = false } = {}) {
+  const { extension } = installPaths(user);
   source = realpathSync(resolve(source));
   if (!existsSync(target) || !statSync(target).isDirectory()) {
     throw new InstallError(`There is no folder ${target}. Give the path of the repository that gets Ternleaf.`);
@@ -151,14 +165,14 @@ export function plan(source, target, { force = false } = {}) {
   if (inside(join(target, extension), source)) {
     throw new InstallError(`The source ${source} is inside ${extension} of the repository. Run the script from a separate clone or release.`);
   }
-  const manifest = readManifest(target);
+  const manifest = readManifest(target, user);
   const recorded = manifest?.files ?? {};
   const release = version(source);
-  const wanted = new Map(sourceFiles(source).map(file => {
+  const wanted = new Map(sourceFiles(source, { user }).map(file => {
     const bytes = readFileSync(join(source, file.from));
     return [file.to, { from: join(source, file.from), bytes: bytes.length, hash: sha256(bytes) }];
   }));
-  const note = Buffer.from(readme(release));
+  const note = Buffer.from(readme(release, user));
   wanted.set(`${extension}/README.md`, { content: note, bytes: note.length, hash: sha256(note) });
 
   const steps = [];
@@ -180,7 +194,8 @@ export function plan(source, target, { force = false } = {}) {
     if (current === null) continue;
     steps.push({ path, action: current === before ? "delete" : force ? "delete" : "changed-old", hash: before });
   }
-  return { source, target, release, manifest, steps, gitignore: gitignorePlan(target),
+  return { source, target, release, manifest, steps,
+    gitignore: user ? { missing: [] } : gitignorePlan(target),
     blocked: steps.filter(step => ["foreign", "changed", "changed-old"].includes(step.action)) };
 }
 
@@ -195,9 +210,10 @@ function explainBlocked(blocked, print) {
 
 // Remove the files that the manifest lists, the lines that the install added
 // to .gitignore and the folders that it made. Nothing else.
-function removeAll(target, { force, print }) {
+function removeAll(target, { force, print, user }) {
+  const { manifestPath } = installPaths(user);
   target = realpathSync(resolve(target));
-  const manifest = readManifest(target);
+  const manifest = readManifest(target, user);
   if (!manifest) {
     print(`Ternleaf is not installed in ${target}: there is no ${manifestPath}. Nothing was removed.`);
     return 1;
@@ -241,10 +257,20 @@ function removeAll(target, { force, print }) {
 
 // Run one command. Return the exit code. `print` gets one line at a time.
 export function run({ source = fileURLToPath(new URL("..", import.meta.url)), target, check = false, remove = false,
-  force = false, print = line => console.log(line) }) {
+  force = false, user = false, print = line => console.log(line) }) {
+  const { extension, skill, manifestPath } = installPaths(user);
   try {
-    if (remove) return removeAll(target, { force, print });
-    const result = plan(source, target, { force });
+    target ??= user ? resolve(process.env.COPILOT_HOME || join(homedir(), ".copilot")) : undefined;
+    if (user && !existsSync(target)) {
+      if (remove || check) {
+        print(`Ternleaf is not installed in ${target}. Run "node scripts/install.mjs --user" to install it.`);
+        return 1;
+      }
+      sourceFiles(source, { user });
+      mkdirSync(target, { recursive: true });
+    }
+    if (remove) return removeAll(target, { force, print, user });
+    const result = plan(source, target, { force, user });
     const by = action => result.steps.filter(step => step.action === action);
     const adds = by("add"), updates = [...by("update"), ...by("replace")], deletes = by("delete");
     const copies = [...adds, ...updates];
@@ -266,7 +292,7 @@ export function run({ source = fileURLToPath(new URL("..", import.meta.url)), ta
         print(`An install from ${result.source} (Ternleaf ${result.release}) would add ${count(adds.length, "file")}, `
           + `update ${count(updates.length, "file")} and remove ${count(deletes.length, "file")}`
           + (result.gitignore.missing.length ? `, and add ${result.gitignore.missing.join(" and ")} to .gitignore.` : "."));
-        print(`Run "node ${posix(relative(process.cwd(), fileURLToPath(import.meta.url)))} ${result.target}" to do it.`);
+        print(`Run "node ${posix(relative(process.cwd(), fileURLToPath(import.meta.url)))} ${user ? "--user" : result.target}" to do it.`);
       }
       return 1;
     }
@@ -330,7 +356,7 @@ export function run({ source = fileURLToPath(new URL("..", import.meta.url)), ta
     const files = Object.fromEntries(result.steps.filter(step => !["delete", "changed-old"].includes(step.action))
       .map(step => [step.path, step.hash]).sort(([a], [b]) => a.localeCompare(b)));
     writeFileSync(join(result.target, manifestPath), JSON.stringify({
-      ternleaf: result.release, files, gitignore: { created, appended },
+      ternleaf: result.release, scope: user ? "user" : "repository", files, gitignore: { created, appended },
       directories: [...directories].sort(),
     }, null, 2) + "\n");
 
@@ -340,12 +366,14 @@ export function run({ source = fileURLToPath(new URL("..", import.meta.url)), ta
     if (result.gitignore.missing.length) {
       print(`Added ${result.gitignore.missing.join(" and ")} to .gitignore. They hold the saved revisions and the exports of each author.`);
     }
-    if (!existsSync(join(result.target, ".git"))) print(`${result.target} is not a Git repository. The Copilot app finds a repository extension only in a Git repository, so run "git init" in it first.`);
+    if (!user && !existsSync(join(result.target, ".git"))) print(`${result.target} is not a Git repository. The Copilot app finds a repository extension only in a Git repository, so run "git init" in it first.`);
     print("Next:");
-    print(`  1. Open ${result.target} in the GitHub Copilot app and start a new session. An open session does not see the change.`);
+    print(user
+      ? "  1. Open your document project folder in the GitHub Copilot app and start a new session."
+      : `  1. Open ${result.target} in the GitHub Copilot app and start a new session. An open session does not see the change.`);
     print("  2. Choose + > Canvas > Ternleaf, or ask Copilot to open the Ternleaf canvas. It opens a short introduction.");
-    print(`  3. Commit ${extension} and ${skill} if your team must get Ternleaf from the repository.`);
-    print(`If the canvas is not in the list, run "npm ci --prefix ${extension}" in the repository and start a new session.`);
+    if (!user) print(`  3. Commit ${extension} and ${skill} if your team must get Ternleaf from the repository.`);
+    print(`If the canvas is not in the list, run "npm ci --prefix ${user ? join(result.target, extension) : extension}" and start a new session.`);
     return 0;
   } catch (error) {
     if (!(error instanceof InstallError)) throw error;
@@ -355,17 +383,18 @@ export function run({ source = fileURLToPath(new URL("..", import.meta.url)), ta
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  const options = { check: false, remove: false, force: false };
+  const options = { check: false, remove: false, force: false, user: false };
   const targets = [];
   for (const argument of process.argv.slice(2)) {
     if (argument === "--check") options.check = true;
     else if (argument === "--remove") options.remove = true;
     else if (argument === "--force") options.force = true;
+    else if (argument === "--user") options.user = true;
     else if (argument.startsWith("--")) targets.push(null);
     else targets.push(argument);
   }
-  if (targets.length !== 1 || targets[0] === null || (options.check && options.remove)) {
-    console.error("Usage: node scripts/install.mjs [--check | --remove] [--force] <path of the repository>");
+  if ((options.user ? targets.length !== 0 : targets.length !== 1) || targets[0] === null || (options.check && options.remove)) {
+    console.error("Usage: node scripts/install.mjs [--check | --remove] [--force] <repository> | --user");
     process.exitCode = 2;
-  } else process.exitCode = run({ ...options, target: resolve(targets[0]) });
+  } else process.exitCode = run({ ...options, target: targets[0] ? resolve(targets[0]) : undefined });
 }

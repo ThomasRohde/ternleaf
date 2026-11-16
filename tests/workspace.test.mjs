@@ -8,6 +8,47 @@ import { startHost } from "../apps/host/serve.mjs";
 
 const docx = text => Buffer.concat([Buffer.from([0x50, 0x4b, 3, 4]), Buffer.from(text)]);
 
+test("personal fonts apply across projects and project overrides remain local", () => {
+  const personal = realpathSync(mkdtempSync(join(tmpdir(), "ternleaf-fonts-")));
+  const first = project();
+  const second = project();
+  const directory = join(personal, "ternleaf");
+  const file = join(directory, "fonts.json");
+  try {
+    const a = createWorkspace({ project: first, copilotHome: personal });
+    const b = createWorkspace({ project: second, copilotHome: personal });
+    assert.equal(a.resolve().fonts, undefined);
+    mkdirSync(directory);
+    const paths = [join(directory, "Bank-Regular.ttf"), join(directory, "Bank-Bold.ttf")];
+    writeFileSync(file, "\uFEFF" + JSON.stringify({ fonts: ["Bank-Regular.ttf", paths[1]] }));
+    assert.deepEqual(a.resolve().fonts, paths);
+    assert.deepEqual(b.resolve().fonts, paths);
+    // Resolving a document rereads the personal configuration.
+    writeFileSync(file, JSON.stringify({ fonts: ["Bank-Italic.ttf"] }));
+    assert.deepEqual(a.resolve().fonts, [join(directory, "Bank-Italic.ttf")]);
+    mkdirSync(join(first, ".ternleaf"));
+    const local = join(first, ".ternleaf/canvas.json");
+    writeFileSync(local, JSON.stringify({ fonts: ["team.ttf"] }));
+    assert.deepEqual(a.resolve().fonts, [join(first, "team.ttf")]);
+    assert.deepEqual(b.resolve().fonts, [join(directory, "Bank-Italic.ttf")]);
+    writeFileSync(local, JSON.stringify({ fonts: [] }));
+    assert.deepEqual(a.resolve().fonts, []);
+    writeFileSync(local, JSON.stringify({ font: "legacy.ttf" }));
+    assert.equal(a.resolve().font, join(first, "legacy.ttf"));
+    assert.equal(a.resolve().fonts, undefined);
+    writeFileSync(file, "{invalid");
+    assert.throws(() => b.resolve(), error => error instanceof ProjectError && error.message.includes(file));
+    assert.equal(a.resolve().font, join(first, "legacy.ttf"));
+    writeFileSync(file, JSON.stringify({ fonts: "wrong" }));
+    assert.throws(() => b.resolve(), /must be a list of font file paths/);
+    writeFileSync(local, JSON.stringify({ fonts: [null] }));
+    assert.throws(() => a.resolve(), /must be a list of font file paths/);
+    assert(existsSync(file), "personal settings are separate from installed extension files");
+  } finally {
+    for (const folder of [personal, first, second]) rmSync(folder, { recursive: true, force: true });
+  }
+});
+
 function project() {
   const folder = realpathSync(mkdtempSync(join(tmpdir(), "ternleaf-")));
   for (const path of ["engine/prebuilt/webapp", "examples", "docs/notes", "node_modules/pkg", ".hidden"]) {

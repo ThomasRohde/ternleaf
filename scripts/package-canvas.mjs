@@ -43,6 +43,9 @@ export function copyRelease(project, output) {
   writeFileSync(join(output, "README.md"),
     "# Ternleaf release\n\nInstall Ternleaf in a repository with one command:\n\n"
     + "    node scripts/install.mjs <path of the repository>\n\n"
+    + "Install for your user account across projects with:\n\n    node scripts/install.mjs --user\n\n"
+    + "Or install it for your user account across projects:\n\n"
+    + "    node scripts/install.mjs --user\n\n"
     + "Run the same command again to update. Add --check to see what would change, or --remove to remove Ternleaf.\n"
     + "[Install and run Ternleaf](docs/Install.md) has the details.\n");
 }

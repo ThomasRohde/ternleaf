@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 
 // Rules with a fixed form are checked by Ternleaf itself, without a model.
 // They stand in the rules file in a fenced block with the name ternleaf:
@@ -66,7 +67,8 @@ const skipped = new Set(["node_modules", "engine", "exports", "opendoc", "dist",
 // a default document. `.ternleaf/workspace.json` is written by Ternleaf. It
 // remembers the documents that were opened, so a new canvas returns to the
 // last one.
-export function createWorkspace({ project, workingDirectory }) {
+export function createWorkspace({ project, workingDirectory,
+  copilotHome = process.env.COPILOT_HOME || join(homedir(), ".copilot") }) {
   const home = realpathSync(project);
   const roots = [...new Set([workingDirectory, project].filter(Boolean).map(root => realpathSync(root)))];
   const memory = join(home, ".ternleaf", "workspace.json");
@@ -76,6 +78,37 @@ export function createWorkspace({ project, workingDirectory }) {
     if (!existsSync(file)) return {};
     try { return JSON.parse(readFileSync(file, "utf8")); }
     catch { throw new ProjectError(".ternleaf/canvas.json is not valid JSON."); }
+  }
+
+  function fontConfig(settings) {
+    let base = home;
+    let label = ".ternleaf/canvas.json";
+    if (!Object.hasOwn(settings, "fonts") && !Object.hasOwn(settings, "font")) {
+      const file = resolve(copilotHome, "ternleaf/fonts.json");
+      if (!existsSync(file)) return {};
+      try {
+        settings = JSON.parse(readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
+        if (!settings || typeof settings !== "object" || Array.isArray(settings)) throw new Error();
+      } catch {
+        throw new ProjectError(file + " is not valid font configuration JSON.");
+      }
+      base = dirname(file);
+      label = file;
+    }
+    if (settings.fonts !== undefined) {
+      if (!Array.isArray(settings.fonts)
+        || settings.fonts.some(path => typeof path !== "string" || !path.trim())) {
+        throw new ProjectError('The "fonts" setting in ' + label + " must be a list of font file paths.");
+      }
+      return { fonts: settings.fonts.map(path => resolve(base, path)) };
+    }
+    if (settings.font !== undefined) {
+      if (typeof settings.font !== "string" || !settings.font.trim()) {
+        throw new ProjectError('The "font" setting in ' + label + " must be a font file path.");
+      }
+      return { font: resolve(base, settings.font) };
+    }
+    return {};
   }
 
   function remembered() {
@@ -124,8 +157,7 @@ export function createWorkspace({ project, workingDirectory }) {
     const settings = config();
     const result = {
       engine: resolve(home, settings.engine ?? findEngine(home) ?? join(ternleaf, engines[1])),
-      font: settings.font ? resolve(home, settings.font) : undefined,
-      fonts: settings.fonts?.map(path => resolve(home, path)),
+      ...fontConfig(settings),
       loseProposalReplyOnce: settings.verification?.loseProposalReplyOnce === true,
       captureWordComparison: settings.verification?.captureWordComparison === true,
       // With "chat": false, Copilot works only on what the author sends

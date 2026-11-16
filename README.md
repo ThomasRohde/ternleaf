@@ -27,6 +27,8 @@ You need the GitHub Copilot desktop app with canvas extensions, and Git. The rep
 
 To use Ternleaf in your own repository, run `node scripts/install.mjs <path of the repository>` from a clone or a release. It puts Ternleaf in `.github/extensions/ternleaf` and `.github/skills/ternleaf`, and adds `.ternleaf/` and `exports/` to `.gitignore`. Run it again to update. [Install and run Ternleaf](docs/Install.md) has the details.
 
+To install it for your user account across projects, run `node scripts/install.mjs --user`. Then open your document project in Copilot and start a new session. Put shared fonts in `~/.copilot/ternleaf/fonts.json`. [User installation](docs/Install.md#install-for-your-user-account) and [workplace fonts](docs/Install.md#your-danske-bank-font) cover setup.
+
 To try Ternleaf in this repository:
 
 1. Clone this repository.

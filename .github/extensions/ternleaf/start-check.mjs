@@ -2,7 +2,7 @@
 // nothing from Ternleaf, so it works when the other parts are missing. Each
 // problem is one sentence for the author: what is missing and what to do.
 import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 // The parts that the extension imports. scripts/install.mjs copies them.
 export const parts = ["apps/agent/actions.mjs", "apps/agent/context.mjs", "apps/agent/guide.mjs",
@@ -17,9 +17,11 @@ export function partsFolder(extensionFolder) {
   return existsSync(join(extensionFolder, "apps/host/serve.mjs")) ? extensionFolder : resolve(extensionFolder, "../../..");
 }
 
-// The project folder is the repository that holds .github/extensions/ternleaf.
-export function projectFolder(extensionFolder) {
-  return dirname(dirname(dirname(resolve(extensionFolder))));
+// Repository extensions belong to their repository. A personal extension
+// serves the project of the Copilot session that opens the canvas.
+export function projectFolder(extensionFolder, workingDirectory = process.cwd()) {
+  const parent = dirname(dirname(resolve(extensionFolder)));
+  return basename(parent) === ".github" ? dirname(parent) : resolve(workingDirectory);
 }
 
 // Return null when the extension can start, or one sentence for the author.

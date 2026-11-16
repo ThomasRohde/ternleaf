@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
@@ -40,6 +41,19 @@ function snapshot(folder) {
 
 const quiet = () => { const lines = []; return { lines, print: line => lines.push(line), text: () => lines.join("\n") }; };
 const install = (target, options = {}) => { const out = quiet(); return { code: run({ source, target, print: out.print, ...options }), text: out.text() }; };
+
+function stubSdk(installed) {
+  const sdk = join(installed, "node_modules/@github/copilot-sdk");
+  mkdirSync(sdk, { recursive: true });
+  writeFileSync(join(sdk, "package.json"), JSON.stringify({ name: "@github/copilot-sdk", type: "module", exports: { "./extension": "./extension.js" } }));
+  writeFileSync(join(sdk, "extension.js"), `
+    export class CanvasError extends Error { constructor(code, message) { super(message); this.code = code; } }
+    export const createCanvas = options => options;
+    export async function joinSession(config) {
+      globalThis.ternleafJoined = config;
+      return { send: async () => {}, log: async () => {}, on: () => {}, rpc: { canvas: { open: async () => {} } } };
+    }`);
+}
 
 test("install puts Ternleaf in .github, adds .gitignore lines once and a second run changes nothing", () => {
   const target = repository({ gitignore: "node_modules/\n/exports\n" });
@@ -186,6 +200,79 @@ test("the installed copy finds its engine, its introduction and the documents of
 
 const basenameOf = path => path.split(/[\\/]/).pop();
 
+test("user installation updates and removes personal files while retaining project state", async () => {
+  const personal = realpathSync(mkdtempSync(join(tmpdir(), "ternleaf-personal-")));
+  const project = repository();
+  try {
+    writeFileSync(join(personal, "config.json"), '{"theme":"dark"}\n');
+    const before = snapshot(project);
+    const options = { user: true, target: personal };
+    const installed = install(personal, options);
+    assert.equal(installed.code, 0, installed.text);
+    const folder = join(personal, "extensions/ternleaf");
+    assert.equal(partsFolder(folder), folder);
+    assert.equal(projectFolder(folder, project), project);
+    assert.equal(await startProblem(folder), null);
+    assert(existsSync(join(personal, "skills/ternleaf/SKILL.md")));
+    assert(!existsSync(join(personal, ".gitignore")));
+    assert.deepEqual(snapshot(project), before);
+    assert.match(installed.text, /Open your document project folder/);
+    assert.doesNotMatch(installed.text, /git init|Commit extensions/);
+    const after = snapshot(personal);
+    assert.equal(install(personal, { ...options, check: true }).code, 0);
+    assert.equal(install(personal, options).code, 0);
+    assert.deepEqual(snapshot(personal), after);
+
+    const engine = join(folder, "apps/editor/editor.mjs");
+    const original = readFileSync(engine, "utf8");
+    writeFileSync(engine, original + "\n// Local change\n");
+    assert.equal(install(personal, options).code, 1);
+    assert.equal(install(personal, { ...options, force: true }).code, 0);
+    assert.equal(readFileSync(engine, "utf8"), original);
+    const { createWorkspace } = await import(pathToFileURL(join(folder, "apps/host/project.mjs")).href);
+    mkdirSync(join(project, ".ternleaf"));
+    const font = join(project, "bank-font.ttf");
+    writeFileSync(font, "disposable local font file");
+    writeFileSync(join(project, ".ternleaf/canvas.json"), JSON.stringify({ fonts: [font] }));
+    const workspace = createWorkspace({ project });
+    const resolved = workspace.resolve("docs/Brief.docx");
+    assert.equal(resolved.source, join(project, "docs/Brief.docx"));
+    assert.equal(resolved.engine, join(folder, "engine/prebuilt/webapp"));
+    assert.deepEqual(resolved.fonts, [font]);
+    workspace.remember(resolved.source, 0);
+    stubSdk(folder);
+    await import(pathToFileURL(join(folder, "extension.mjs")).href);
+    const [canvas] = globalThis.ternleafJoined.canvases;
+    const opened = await canvas.open({ instanceId: "personal", input: { document: "docs/Brief.docx" },
+      session: { workingDirectory: project } });
+    try {
+      assert.equal(opened.title, "Brief.docx");
+      assert.equal((await fetch(new URL("/editor.html", opened.url))).status, 200);
+      assert(!existsSync(join(personal, ".ternleaf")), "history belongs to the active project");
+    } finally { await canvas.onClose({ instanceId: "personal" }); }
+    const projectBeforeRemoval = snapshot(project);
+    assert.equal(install(personal, { ...options, remove: true }).code, 0);
+    assert.deepEqual(snapshot(project), projectBeforeRemoval);
+    // Copilot supplies the SDK. This test's stand-in is not an installed file.
+    rmSync(join(folder, "node_modules"), { recursive: true });
+    for (const path of [folder, join(personal, "extensions")]) {
+      if (existsSync(path) && readdirSync(path).length === 0) rmSync(path, { recursive: true });
+    }
+    assert.deepEqual(snapshot(personal), {
+      "config.json": createHash("sha256").update('{"theme":"dark"}\n').digest("hex"),
+    });
+    const missing = join(personal, "new-copilot-home");
+    const check = spawnSync(process.execPath, [join(source, "scripts/install.mjs"), "--user", "--check"],
+      { encoding: "utf8", env: { ...process.env, COPILOT_HOME: missing } });
+    assert.equal(check.status, 1);
+    assert(check.stdout.includes(missing), check.stdout);
+    assert(!existsSync(missing));
+  } finally {
+    rmSync(personal, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
 test("the installed extension opens a canvas on the repository", async () => {
   const target = repository();
   try {
@@ -193,16 +280,7 @@ test("the installed extension opens a canvas on the repository", async () => {
     const installed = join(target, extension);
     // A stand-in for the SDK that the Copilot app gives the extension. It
     // keeps what the extension registers.
-    const sdk = join(installed, "node_modules/@github/copilot-sdk");
-    mkdirSync(sdk, { recursive: true });
-    writeFileSync(join(sdk, "package.json"), JSON.stringify({ name: "@github/copilot-sdk", type: "module", exports: { "./extension": "./extension.js" } }));
-    writeFileSync(join(sdk, "extension.js"), `
-      export class CanvasError extends Error { constructor(code, message) { super(message); this.code = code; } }
-      export const createCanvas = options => options;
-      export async function joinSession(config) {
-        globalThis.ternleafJoined = config;
-        return { send: async () => {}, log: async () => {}, on: () => {}, rpc: { canvas: { open: async () => {} } } };
-      }`);
+    stubSdk(installed);
     await import(pathToFileURL(join(installed, "extension.mjs")).href);
     const [canvas] = globalThis.ternleafJoined.canvases;
     assert(canvas.actions.length > 5);
